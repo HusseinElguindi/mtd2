@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -195,5 +196,43 @@ func TestRedirectWithCookie(t *testing.T) {
 	}
 	if got, want := hashFile(t, out), sha256.Sum256(blob); got != want {
 		t.Errorf("output hash mismatch: got %x, want %x", got, want)
+	}
+}
+
+func TestRedirectResolvedOnce(t *testing.T) {
+	// Model an entry URL that mints a single-use redirect target and 400s
+	// on re-mints (as many ticketed download services do): the probe may
+	// hit /start once, and every chunk request must go straight to the
+	// minted URL — with 8 chunks, re-following the redirect per chunk
+	// would fail immediately.
+	blob := testBlob(2 << 20)
+	var mints atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
+		if mints.Add(1) > 1 {
+			http.Error(w, "ticket already issued", http.StatusBadRequest)
+			return
+		}
+		http.Redirect(w, r, "/v1/ticket-abc", http.StatusFound)
+	})
+	mux.HandleFunc("/v1/ticket-abc", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "blob", time.Now(), bytes.NewReader(blob))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	out := filepath.Join(t.TempDir(), "out.bin")
+	d, err := New(Options{URL: srv.URL + "/start", Output: out, ChunkSize: 256 << 10, Client: srv.Client()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := d.Run(t.Context()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got, want := hashFile(t, out), sha256.Sum256(blob); got != want {
+		t.Errorf("output hash mismatch: got %x, want %x", got, want)
+	}
+	if n := mints.Load(); n != 1 {
+		t.Errorf("entry URL hit %d times, want exactly 1 (the probe)", n)
 	}
 }

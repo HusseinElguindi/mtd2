@@ -21,6 +21,12 @@ type ProbeResult struct {
 	RangesSupported bool
 	ETag            string
 	LastModified    string
+	// FinalURL is the URL that actually served the response, after any
+	// redirects. Follow-up requests should go here directly: entry URLs
+	// that mint per-request redirect targets (signed tickets) often
+	// reject rapid or concurrent re-mints, so the redirect chain must be
+	// resolved once, not once per chunk.
+	FinalURL string
 }
 
 // Probe issues a GET with "Range: bytes=0-0" to discover the resource's
@@ -44,6 +50,7 @@ func Probe(ctx context.Context, client *http.Client, url string) (ProbeResult, e
 	res := ProbeResult{
 		ETag:         resp.Header.Get("ETag"),
 		LastModified: resp.Header.Get("Last-Modified"),
+		FinalURL:     resp.Request.URL.String(),
 	}
 
 	switch resp.StatusCode {

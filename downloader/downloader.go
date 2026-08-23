@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -100,6 +101,36 @@ type Downloader struct {
 	size   int64
 	chunks []*chunk
 	prog   tracker
+
+	// fetchURL is the redirect-resolved URL all data requests go to; it
+	// starts as the probe's FinalURL and is refreshed by re-probing when
+	// a chunk retries (in case a signed URL expired mid-download). The
+	// user-supplied opts.URL remains the download's identity (state file,
+	// resume validation).
+	fetchMu  sync.Mutex
+	fetchURL string
+}
+
+func (d *Downloader) getFetchURL() string {
+	d.fetchMu.Lock()
+	defer d.fetchMu.Unlock()
+	return d.fetchURL
+}
+
+func (d *Downloader) setFetchURL(u string) {
+	d.fetchMu.Lock()
+	d.fetchURL = u
+	d.fetchMu.Unlock()
+}
+
+// refreshFetchURL re-resolves the redirect chain from the original URL,
+// picking up a fresh ticket/signature if the old one stopped working. A
+// failed refresh keeps the current URL — the retry then fails through the
+// normal path with the real error.
+func (d *Downloader) refreshFetchURL(ctx context.Context) {
+	if probe, err := Probe(ctx, d.client, d.opts.URL); err == nil && probe.FinalURL != "" {
+		d.setFetchURL(probe.FinalURL)
+	}
 }
 
 // New returns a Downloader for the given options, applying defaults.
@@ -136,6 +167,7 @@ func (d *Downloader) Run(ctx context.Context) error {
 		return err
 	}
 	d.size = probe.Size
+	d.setFetchURL(probe.FinalURL)
 
 	f, err := os.OpenFile(d.opts.Output, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
@@ -263,6 +295,7 @@ func (d *Downloader) downloadChunk(ctx context.Context, f *os.File, c *chunk) er
 				return ctx.Err()
 			case <-time.After(time.Duration(attempt-1) * retryBackoff):
 			}
+			d.refreshFetchURL(ctx)
 		}
 		lastErr = d.fetchChunk(ctx, f, c)
 		if lastErr == nil {
@@ -284,7 +317,7 @@ func (d *Downloader) fetchChunk(ctx context.Context, f *os.File, c *chunk) error
 		return nil
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.opts.URL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.getFetchURL(), nil)
 	if err != nil {
 		return err
 	}
@@ -347,7 +380,7 @@ func (d *Downloader) copyToFile(f *os.File, body io.Reader, off int64, done *ato
 // coalescing write loop. When the size is known the file is represented as
 // a single chunk so progress reporting still works.
 func (d *Downloader) singleStream(ctx context.Context, f *os.File) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.opts.URL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.getFetchURL(), nil)
 	if err != nil {
 		return err
 	}
