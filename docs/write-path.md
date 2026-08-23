@@ -4,7 +4,7 @@ Every worker writes into the same file handle concurrently, with no mutex,
 no per-worker file handles, and no `BufWriter`-style userspace buffering
 beyond one 256 KiB buffer per worker. This page explains why that is safe
 and why the constants are what they are. The measured numbers come from the
-findings notebook bundled in this repo, [`one-file-ten-threads.html`](../one-file-ten-threads.html),
+findings notebook bundled in this repo, [`one-file-ten-threads.html`](one-file-ten-threads.html),
 which re-benchmarked the classic "why is multi-threaded file I/O slower in
 Rust than Go" question: ~2.3 µs per 64 KiB `pwrite`, 98 ns per `lseek`, on
 a page-cached ext4 file.
