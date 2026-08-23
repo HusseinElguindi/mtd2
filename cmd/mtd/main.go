@@ -9,6 +9,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"os/signal"
@@ -20,11 +22,35 @@ import (
 	"mtd2/downloader"
 )
 
+// dumpTransport prints each request and response (headers only, as they
+// go over the wire) to stderr, for debugging servers that reject the
+// probe. Redirect hops are visible too: the transport sits below the
+// client's redirect handling, so every hop passes through here.
+type dumpTransport struct {
+	rt http.RoundTripper
+}
+
+func (d dumpTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if out, err := httputil.DumpRequestOut(req, false); err == nil {
+		fmt.Fprintf(os.Stderr, "> %s\n", strings.ReplaceAll(strings.TrimSpace(string(out)), "\r\n", "\n> "))
+	}
+	resp, err := d.rt.RoundTrip(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "< error: %v\n", err)
+		return resp, err
+	}
+	if out, derr := httputil.DumpResponse(resp, false); derr == nil {
+		fmt.Fprintf(os.Stderr, "< %s\n", strings.ReplaceAll(strings.TrimSpace(string(out)), "\r\n", "\n< "))
+	}
+	return resp, err
+}
+
 func main() {
 	output := flag.String("o", "", "output file (default: last URL path element)")
 	concurrency := flag.Int("c", 8, "number of parallel connections")
 	chunkSize := flag.String("s", "", "chunk size, e.g. 16MiB (default: derived from file size)")
 	restart := flag.Bool("restart", false, "discard any saved state and partial file, start over")
+	verbose := flag.Bool("v", false, "dump HTTP request/response headers to stderr")
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "usage: mtd [-o output] [-c concurrency] [-s chunk-size] [--restart] <url>\n")
 		flag.PrintDefaults()
@@ -34,13 +60,13 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
-	if err := run(flag.Arg(0), *output, *concurrency, *chunkSize, *restart); err != nil {
+	if err := run(flag.Arg(0), *output, *concurrency, *chunkSize, *restart, *verbose); err != nil {
 		fmt.Fprintln(os.Stderr, "mtd:", err)
 		os.Exit(1)
 	}
 }
 
-func run(rawURL, output string, concurrency int, chunkSizeArg string, restart bool) error {
+func run(rawURL, output string, concurrency int, chunkSizeArg string, restart, verbose bool) error {
 	if output == "" {
 		var err error
 		if output, err = defaultOutput(rawURL); err != nil {
@@ -59,11 +85,16 @@ func run(rawURL, output string, concurrency int, chunkSizeArg string, restart bo
 		os.Remove(downloader.StatePath(output))
 	}
 
+	var client *http.Client
+	if verbose {
+		client = &http.Client{Transport: dumpTransport{http.DefaultTransport}}
+	}
 	d, err := downloader.New(downloader.Options{
 		URL:         rawURL,
 		Output:      output,
 		Concurrency: concurrency,
 		ChunkSize:   chunkSize,
+		Client:      client,
 	})
 	if err != nil {
 		return err
