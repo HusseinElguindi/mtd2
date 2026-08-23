@@ -421,11 +421,9 @@ func TestRefreshRejectsChangedResource(t *testing.T) {
 	})
 	mux.HandleFunc("/v1/ticket", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Range") != "bytes=0-0" && v1Fails.Add(1) == 1 {
-			// Truncate the first chunk request to force a retry (and with
-			// it a refresh probe).
-			w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", len(blobV1)-1, len(blobV1)))
-			w.WriteHeader(http.StatusPartialContent)
-			w.Write(blobV1[:100])
+			// Fail the first chunk request with a server error — the
+			// failure class that triggers a refresh probe on retry.
+			http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		w.Header().Set("ETag", `"v1"`)
@@ -451,5 +449,47 @@ func TestRefreshRejectsChangedResource(t *testing.T) {
 	}
 	if probes.Load() < 2 {
 		t.Errorf("refresh probe never happened (probes=%d); test exercised nothing", probes.Load())
+	}
+}
+
+func TestNoRefreshOnBodyError(t *testing.T) {
+	// A truncated body is an I/O failure, not a stale-URL signal: the
+	// retry must NOT re-probe the entry URL (which may rate-limit ticket
+	// re-mints — modeled here as a hard 400 on any second mint).
+	blob := testBlob(512 << 10)
+	var mints, fails atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
+		if mints.Add(1) > 1 {
+			http.Error(w, "ticket already issued", http.StatusBadRequest)
+			return
+		}
+		http.Redirect(w, r, "/v1/ticket", http.StatusFound)
+	})
+	mux.HandleFunc("/v1/ticket", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "bytes=0-0" && fails.Add(1) == 1 {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", len(blob)-1, len(blob)))
+			w.WriteHeader(http.StatusPartialContent)
+			w.Write(blob[:100]) // truncate: body ends early
+			return
+		}
+		http.ServeContent(w, r, "blob", time.Time{}, bytes.NewReader(blob))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	out := filepath.Join(t.TempDir(), "out.bin")
+	d, err := New(Options{URL: srv.URL + "/start", Output: out, Concurrency: 1, ChunkSize: 512 << 10, Client: srv.Client()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := d.Run(t.Context()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got, want := hashFile(t, out), sha256.Sum256(blob); got != want {
+		t.Errorf("output hash mismatch: got %x, want %x", got, want)
+	}
+	if n := mints.Load(); n != 1 {
+		t.Errorf("entry URL hit %d times, want 1: an I/O error triggered a refresh probe", n)
 	}
 }

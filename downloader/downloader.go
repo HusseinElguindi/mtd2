@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 )
 
 // writeBufSize is the size of each worker's coalescing buffer: reads from
@@ -183,7 +184,8 @@ type Downloader struct {
 
 	// origProbe is the session's first probe; URL refreshes are accepted
 	// only when a fresh probe still matches it (see probeMatches).
-	origProbe ProbeResult
+	origProbe    ProbeResult
+	refreshGroup singleflight.Group
 }
 
 func (d *Downloader) getFetchURL() string {
@@ -202,19 +204,33 @@ func (d *Downloader) setFetchURL(u string) {
 // picking up a fresh ticket/signature if the old one stopped working. A
 // failed refresh keeps the current URL — the retry then fails through the
 // normal path with the real error.
+// Concurrent retries collapse into one probe via singleflight: several
+// workers failing at once (one server blip) must not hammer the entry URL
+// with parallel re-mints it may rate-limit.
 func (d *Downloader) refreshFetchURL(ctx context.Context) {
-	probe, err := Probe(ctx, d.client, d.opts.URL)
-	if err != nil || probe.FinalURL == "" {
-		return
-	}
-	// Adopt the fresh URL only if it still describes the same resource: a
-	// re-mint resolving to different content (origin file changed, another
-	// variant) must not be spliced into the existing chunk grid — that
-	// would mix bytes of two files and report success.
-	if probeMatches(d.origProbe, probe) {
-		d.setFetchURL(probe.FinalURL)
-	}
+	d.refreshGroup.Do("refresh", func() (any, error) {
+		probe, err := Probe(ctx, d.client, d.opts.URL)
+		if err != nil || probe.FinalURL == "" {
+			return nil, nil
+		}
+		// Adopt the fresh URL only if it still describes the same
+		// resource: a re-mint resolving to different content (origin file
+		// changed, another variant) must not be spliced into the existing
+		// chunk grid — that would mix bytes of two files and report
+		// success.
+		if probeMatches(d.origProbe, probe) {
+			d.setFetchURL(probe.FinalURL)
+		}
+		return nil, nil
+	})
 }
+
+// badResponseError marks a server response that suggests the fetch URL
+// went stale (expired ticket, wrong resource) — the one failure class
+// where re-resolving the redirect chain can help a retry.
+type badResponseError struct{ msg string }
+
+func (e *badResponseError) Error() string { return e.msg }
 
 // probeMatches reports whether two probes plausibly describe the same
 // resource: sizes must match, and each validator is compared when both
@@ -396,7 +412,14 @@ func (d *Downloader) downloadChunk(ctx context.Context, f *os.File, c *chunk) er
 				return ctx.Err()
 			case <-time.After(time.Duration(attempt-1) * retryBackoff):
 			}
-			d.refreshFetchURL(ctx)
+			// Re-resolve the redirect chain only when the server's
+			// response suggests a stale URL (expired ticket); local I/O
+			// errors and truncated bodies gain nothing from a re-probe,
+			// and entry URLs often rate-limit ticket re-mints.
+			var bad *badResponseError
+			if errors.As(lastErr, &bad) {
+				d.refreshFetchURL(ctx)
+			}
 		}
 		lastErr = d.fetchChunk(ctx, f, c)
 		if lastErr == nil {
@@ -430,7 +453,7 @@ func (d *Downloader) fetchChunk(ctx context.Context, f *os.File, c *chunk) error
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusPartialContent {
-		return fmt.Errorf("range request: unexpected status %s", resp.Status)
+		return &badResponseError{fmt.Sprintf("range request: unexpected status %s", resp.Status)}
 	}
 	// A 206 alone doesn't prove the server honored our start offset: one
 	// that ignores the range start (easiest to hit on a retry, where
@@ -438,9 +461,9 @@ func (d *Downloader) fetchChunk(ctx context.Context, f *os.File, c *chunk) error
 	// corrupting the file with no error. Require the echoed start.
 	switch gotStart, err := parseContentRangeStart(resp.Header.Get("Content-Range")); {
 	case err != nil:
-		return fmt.Errorf("range request: %w", err)
+		return &badResponseError{fmt.Sprintf("range request: %v", err)}
 	case gotStart != start:
-		return fmt.Errorf("range request: server range starts at %d, requested %d", gotStart, start)
+		return &badResponseError{fmt.Sprintf("range request: server range starts at %d, requested %d", gotStart, start)}
 	}
 
 	// Bound the body to the bytes we asked for: a server that honors the
