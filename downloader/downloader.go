@@ -136,6 +136,9 @@ func (d *Downloader) Run(ctx context.Context) error {
 		if err := d.singleStream(ctx, f); err != nil {
 			return err
 		}
+		// A stale state file (from when the server still supported
+		// ranges) describes data this full re-download just replaced.
+		os.Remove(StatePath(d.opts.Output))
 		return f.Close()
 	}
 
@@ -148,7 +151,41 @@ func (d *Downloader) Run(ctx context.Context) error {
 		return fmt.Errorf("preallocate %s: %w", d.opts.Output, err)
 	}
 
-	d.chunks = buildChunks(probe.Size, d.chunkSize(probe.Size))
+	// Resume: a valid state file restores each chunk's done counter (and
+	// pins the chunk grid to the one it was saved with); an invalid one is
+	// a hard error so a changed remote never corrupts the partial file.
+	statePath := StatePath(d.opts.Output)
+	cs := d.chunkSize(probe.Size)
+	st, err := loadState(statePath)
+	if err != nil {
+		return err
+	}
+	if st != nil {
+		if err := st.validate(d.opts.URL, probe); err != nil {
+			return err
+		}
+		cs = st.ChunkSize
+	}
+	d.chunks = buildChunks(probe.Size, cs)
+	if st != nil {
+		st.restore(d.chunks)
+	} else {
+		st = &state{
+			URL:          d.opts.URL,
+			Size:         probe.Size,
+			ETag:         probe.ETag,
+			LastModified: probe.LastModified,
+			ChunkSize:    cs,
+			Done:         make([]int64, len(d.chunks)),
+		}
+	}
+
+	stop := make(chan struct{})
+	saverDone := make(chan struct{})
+	go func() {
+		defer close(saverDone)
+		st.runSaver(statePath, d.chunks, stop)
+	}()
 
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(d.opts.Concurrency)
@@ -158,9 +195,17 @@ func (d *Downloader) Run(ctx context.Context) error {
 		}
 		g.Go(func() error { return d.downloadChunk(ctx, f, c) })
 	}
-	if err := g.Wait(); err != nil {
+	err = g.Wait()
+
+	// Stop the saver and wait for its final flush before deciding the
+	// state file's fate: on failure it holds the resume point; on success
+	// it is obsolete.
+	close(stop)
+	<-saverDone
+	if err != nil {
 		return err
 	}
+	os.Remove(statePath)
 	return f.Close()
 }
 
