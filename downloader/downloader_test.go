@@ -3,6 +3,7 @@ package downloader
 import (
 	"bytes"
 	"crypto/sha256"
+	"fmt"
 	"io"
 	"math/rand"
 	"net/http"
@@ -329,5 +330,47 @@ func TestRedirectLocationWithIllegalQuery(t *testing.T) {
 	}
 	if got, want := hashFile(t, out), sha256.Sum256(blob); got != want {
 		t.Errorf("output hash mismatch: got %x, want %x", got, want)
+	}
+}
+
+// rangeStart extracts the start offset of a request's Range header
+// ("bytes=start-end"); test servers use it to misbehave realistically.
+func rangeStart(t *testing.T, r *http.Request) int64 {
+	t.Helper()
+	var start, end int64
+	if _, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &start, &end); err != nil {
+		t.Errorf("unparseable Range %q: %v", r.Header.Get("Range"), err)
+	}
+	return start
+}
+
+func TestServerIgnoresRangeEnd(t *testing.T) {
+	// A server that honors the range start but streams to EOF must not let
+	// one worker overwrite the chunks that follow its own.
+	blob := testBlob(1 << 20)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := rangeStart(t, r)
+		w.Header().Set("Content-Range",
+			fmt.Sprintf("bytes %d-%d/%d", start, len(blob)-1, len(blob)))
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write(blob[start:]) // ignores the requested end
+	}))
+	defer srv.Close()
+
+	out := filepath.Join(t.TempDir(), "out.bin")
+	d, err := New(Options{URL: srv.URL, Output: out, ChunkSize: 256 << 10, Client: srv.Client()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := d.Run(t.Context()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got, want := hashFile(t, out), sha256.Sum256(blob); got != want {
+		t.Errorf("output hash mismatch: got %x, want %x", got, want)
+	}
+	for _, c := range d.chunks {
+		if got := c.done.Load(); got != c.length {
+			t.Errorf("chunk %d done = %d, want exactly %d (over-delivery not bounded?)", c.index, got, c.length)
+		}
 	}
 }

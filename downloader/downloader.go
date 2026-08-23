@@ -405,7 +405,11 @@ func (d *Downloader) fetchChunk(ctx context.Context, f *os.File, c *chunk) error
 		return fmt.Errorf("range request: unexpected status %s", resp.Status)
 	}
 
-	if err := d.copyToFile(f, resp.Body, start, &c.done); err != nil {
+	// Bound the body to the bytes we asked for: a server that honors the
+	// range start but streams to EOF would otherwise be written past the
+	// chunk's end, silently overwriting regions other workers own (and
+	// are possibly writing concurrently).
+	if err := d.copyToFile(f, io.LimitReader(resp.Body, end-start+1), start, &c.done); err != nil {
 		return err
 	}
 	if got := c.done.Load(); got < c.length {
