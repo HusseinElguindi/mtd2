@@ -91,6 +91,36 @@ type Options struct {
 	Client *http.Client
 }
 
+// NewClient returns the HTTP client the downloader uses by default,
+// tuned for download flows a stock http.Client mishandles:
+//
+//   - A cookie jar: redirect flows commonly Set-Cookie on the 302 (session
+//     token, signed ticket) and expect it back on the redirected request.
+//   - No Referer on redirect hops: Go's client adds one automatically when
+//     following a redirect (a fresh request to the same URL has none), and
+//     some signed-URL hosts reject referred requests — making a followed
+//     redirect fail where pasting the Location URL works. curl sends no
+//     Referer either.
+//
+// transport is the underlying RoundTripper; nil means http.DefaultTransport.
+func NewClient(transport http.RoundTripper) (*http.Client, error) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Client{
+		Jar:       jar,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			req.Header.Del("Referer")
+			return nil
+		},
+	}, nil
+}
+
 // Downloader downloads one URL to one output file, in concurrent byte-range
 // chunks when the server supports them, falling back to a single stream
 // otherwise.
@@ -146,15 +176,10 @@ func New(opts Options) (*Downloader, error) {
 	}
 	client := opts.Client
 	if client == nil {
-		// A cookie jar by default: redirect-based download flows commonly
-		// Set-Cookie on the 302 (session token, signed ticket) and expect
-		// it back on the redirected request — without a jar those flows
-		// fail with opaque 4xx responses that a browser never sees.
-		jar, err := cookiejar.New(nil)
-		if err != nil {
+		var err error
+		if client, err = NewClient(nil); err != nil {
 			return nil, err
 		}
-		client = &http.Client{Jar: jar}
 	}
 	return &Downloader{opts: opts, client: client}, nil
 }

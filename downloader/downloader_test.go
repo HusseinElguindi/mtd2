@@ -236,3 +236,37 @@ func TestRedirectResolvedOnce(t *testing.T) {
 		t.Errorf("entry URL hit %d times, want exactly 1 (the probe)", n)
 	}
 }
+
+func TestNoRefererOnRedirect(t *testing.T) {
+	// Some signed-URL hosts reject referred requests: same URL 400s when
+	// reached via redirect (Go adds Referer on followed hops) but works
+	// when requested directly. The default client must follow redirects
+	// without a Referer.
+	blob := testBlob(1 << 20)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/v1/ticket", http.StatusFound)
+	})
+	mux.HandleFunc("/v1/ticket", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Referer") != "" {
+			http.Error(w, "referred requests not allowed", http.StatusBadRequest)
+			return
+		}
+		http.ServeContent(w, r, "blob", time.Now(), bytes.NewReader(blob))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	out := filepath.Join(t.TempDir(), "out.bin")
+	// No Client passed: exercises the library's default client.
+	d, err := New(Options{URL: srv.URL + "/start", Output: out, ChunkSize: 256 << 10})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := d.Run(t.Context()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got, want := hashFile(t, out), sha256.Sum256(blob); got != want {
+		t.Errorf("output hash mismatch: got %x, want %x", got, want)
+	}
+}
