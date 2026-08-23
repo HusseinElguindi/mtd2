@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -116,9 +118,48 @@ func NewClient(transport http.RoundTripper) (*http.Client, error) {
 				return errors.New("stopped after 10 redirects")
 			}
 			req.Header.Del("Referer")
+			// Location headers in the wild carry literal spaces and other
+			// bytes that are illegal in a request target (e.g. a filename
+			// in a query parameter). curl's parser normalizes them; Go's
+			// net/url passes RawQuery through verbatim, and a raw space in
+			// an HTTP/2 :path is a malformed request that servers reject
+			// with an opaque 400 before any handler runs. Escape just the
+			// illegal bytes here, in place, before the hop is sent — this
+			// also cleans the FinalURL that chunk requests reuse.
+			req.URL.RawQuery = escapeIllegalQuery(req.URL.RawQuery)
 			return nil
 		},
 	}, nil
+}
+
+// escapeIllegalQuery percent-encodes only the bytes that cannot appear
+// literally in an HTTP request target's query component: controls and
+// space (<= 0x20), DEL and non-ASCII (>= 0x7f), and the few characters
+// HTTP forbids raw (" < > \ ^ ` { | }). Everything else — including
+// [ ] ( ) ! ' and existing %XX escapes — passes through untouched:
+// re-encoding or reordering parameters can invalidate signed URLs, and
+// matching curl's tolerance is the interoperable choice.
+func escapeIllegalQuery(q string) string {
+	illegal := func(c byte) bool {
+		return c <= 0x20 || c >= 0x7f || strings.IndexByte("\"<>\\^`{|}", c) >= 0
+	}
+	i := 0
+	for i < len(q) && !illegal(q[i]) {
+		i++
+	}
+	if i == len(q) {
+		return q
+	}
+	var b strings.Builder
+	b.WriteString(q[:i])
+	for ; i < len(q); i++ {
+		if c := q[i]; illegal(c) {
+			fmt.Fprintf(&b, "%%%02X", c)
+		} else {
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 // Downloader downloads one URL to one output file, in concurrent byte-range
@@ -173,6 +214,13 @@ func New(opts Options) (*Downloader, error) {
 	}
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = 8
+	}
+	// A pasted URL can carry the same illegal query bytes a redirect can
+	// (net/url keeps RawQuery verbatim); sanitize it once so every request
+	// and the state file's identity use the escaped form consistently.
+	if u, err := url.Parse(opts.URL); err == nil {
+		u.RawQuery = escapeIllegalQuery(u.RawQuery)
+		opts.URL = u.String()
 	}
 	client := opts.Client
 	if client == nil {

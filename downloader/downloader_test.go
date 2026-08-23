@@ -238,10 +238,11 @@ func TestRedirectResolvedOnce(t *testing.T) {
 }
 
 func TestNoRefererOnRedirect(t *testing.T) {
-	// Some signed-URL hosts reject referred requests: same URL 400s when
-	// reached via redirect (Go adds Referer on followed hops) but works
-	// when requested directly. The default client must follow redirects
-	// without a Referer.
+	// The default client follows redirects without a Referer, matching
+	// curl (Go adds one to followed hops by default). This is deliberate
+	// hygiene for picky hosts, not the fix for any observed failure —
+	// the 400-via-redirect bug turned out to be illegal query bytes; see
+	// TestRedirectLocationWithIllegalQuery.
 	blob := testBlob(1 << 20)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
@@ -259,6 +260,66 @@ func TestNoRefererOnRedirect(t *testing.T) {
 
 	out := filepath.Join(t.TempDir(), "out.bin")
 	// No Client passed: exercises the library's default client.
+	d, err := New(Options{URL: srv.URL + "/start", Output: out, ChunkSize: 256 << 10})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := d.Run(t.Context()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got, want := hashFile(t, out), sha256.Sum256(blob); got != want {
+		t.Errorf("output hash mismatch: got %x, want %x", got, want)
+	}
+}
+
+func TestEscapeIllegalQuery(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"", ""},
+		{"a=1&b=2", "a=1&b=2"}, // clean: untouched (and same backing string)
+		{"dload=SITE - [abc] Title! (360).mp4", "dload=SITE%20-%20[abc]%20Title!%20(360).mp4"},
+		{"sig=a%2Bb%2F", "sig=a%2Bb%2F"},                   // existing escapes preserved, not double-encoded
+		{"k=[]()!'*,;", "k=[]()!'*,;"},                     // sub-delims curl tolerates stay literal
+		{"k=a\tb", "k=a%09b"},                              // control byte
+		{"k=caf\xc3\xa9", "k=caf%C3%A9"},                   // non-ASCII
+		{"k=\"<>\\^`{|}", "k=%22%3C%3E%5C%5E%60%7B%7C%7D"}, // HTTP-forbidden raw bytes
+	}
+	for _, tt := range tests {
+		if got := escapeIllegalQuery(tt.in); got != tt.want {
+			t.Errorf("escapeIllegalQuery(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestRedirectLocationWithIllegalQuery(t *testing.T) {
+	// Real-world 302s carry literal spaces in Location query strings (e.g.
+	// a filename in a dload= parameter). A raw space in the request target
+	// is malformed HTTP; servers (nginx, and Go's own) reject it with a
+	// generic 400 before any handler runs — so following such a redirect
+	// fails while a hand-cleaned URL works. The client must escape the
+	// illegal bytes when following.
+	blob := testBlob(1 << 20)
+	const dload = "SITE - [abc] Title! (360).mp4"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
+		// Set Location by hand: http.Redirect would clean the URL, and the
+		// point is to emit the raw bytes real servers emit.
+		w.Header().Set("Location", "/v1/ticket?dload="+dload+"&sig=a%2Bb")
+		w.WriteHeader(http.StatusFound)
+	})
+	mux.HandleFunc("/v1/ticket", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("dload"); got != dload {
+			t.Errorf("dload arrived as %q, want %q", got, dload)
+		}
+		if got := r.URL.Query().Get("sig"); got != "a+b" {
+			t.Errorf("sig arrived as %q, want %q (double-encoded?)", got, "a+b")
+		}
+		http.ServeContent(w, r, "blob", time.Now(), bytes.NewReader(blob))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	out := filepath.Join(t.TempDir(), "out.bin")
+	// No Client passed: exercises the default client's redirect handling.
 	d, err := New(Options{URL: srv.URL + "/start", Output: out, ChunkSize: 256 << 10})
 	if err != nil {
 		t.Fatalf("New: %v", err)
