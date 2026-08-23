@@ -21,6 +21,7 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -57,8 +58,15 @@ func main() {
 	if _, err := io.Copy(h, io.NewSectionReader(blob, 0, size)); err != nil {
 		log.Fatalf("hashing blob: %v", err)
 	}
+	// Bind before printing the banner: if the port is taken (8080 often
+	// is), the only output is the error — not a serving line that makes a
+	// dead server look alive while some other process answers the port.
+	ln, err := net.Listen("tcp", *addr)
+	if err != nil {
+		log.Fatal(err)
+	}
 	fmt.Printf("blob: %d bytes, sha256 %x\n", size, h.Sum(nil))
-	fmt.Printf("serving http://%s/blob\n", *addr)
+	fmt.Printf("serving http://%s/blob\n", ln.Addr())
 
 	modTime := time.Now()
 	http.HandleFunc("/blob", func(w http.ResponseWriter, r *http.Request) {
@@ -89,7 +97,7 @@ func main() {
 		http.ServeContent(out, r, "blob", modTime, io.NewSectionReader(blob, 0, size))
 	})
 
-	log.Fatal(http.ListenAndServe(*addr, nil))
+	log.Fatal(http.Serve(ln, nil))
 }
 
 // blobReader generates a deterministic pseudo-random blob of the given size

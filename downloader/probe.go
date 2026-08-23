@@ -6,6 +6,7 @@ package downloader
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -57,9 +58,25 @@ func Probe(ctx context.Context, client *http.Client, url string) (ProbeResult, e
 		// Server ignored the Range header: no range support.
 		res.Size = resp.ContentLength // -1 if unknown
 	default:
-		return ProbeResult{}, fmt.Errorf("probe %s: unexpected status %s", url, resp.Status)
+		return ProbeResult{}, fmt.Errorf("probe %s: unexpected status %s%s", url, resp.Status, responseDetail(resp))
 	}
 	return res, nil
+}
+
+// responseDetail summarizes an unexpected response — the Server header and
+// the start of the body — so a request answered by the wrong service (a
+// stale process on the port, a proxy, a captive portal) identifies itself
+// in the error instead of hiding behind a bare status code.
+func responseDetail(resp *http.Response) string {
+	var b strings.Builder
+	if server := resp.Header.Get("Server"); server != "" {
+		fmt.Fprintf(&b, " (server: %s)", server)
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
+	if snippet := strings.TrimSpace(string(body)); snippet != "" {
+		fmt.Fprintf(&b, ": %q", snippet)
+	}
+	return b.String()
 }
 
 // parseContentRangeTotal extracts the complete length from a Content-Range
