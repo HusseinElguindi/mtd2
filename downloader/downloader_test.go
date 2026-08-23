@@ -3,6 +3,7 @@ package downloader
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -67,6 +68,11 @@ func TestConcurrentDownload(t *testing.T) {
 	for _, c := range d.chunks {
 		if c.done.Load() != c.length {
 			t.Errorf("chunk %d done = %d, want %d", c.index, c.done.Load(), c.length)
+		}
+	}
+	for _, leftover := range []string{PartPath(out), StatePath(out)} {
+		if _, err := os.Stat(leftover); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s still present after completion (err=%v)", leftover, err)
 		}
 	}
 }
@@ -509,7 +515,7 @@ func TestSingleStreamUnknownLengthTruncatesStaleTail(t *testing.T) {
 
 	out := filepath.Join(t.TempDir(), "out.bin")
 	stale := bytes.Repeat([]byte{0xAA}, len(blob)*2) // longer earlier attempt
-	if err := os.WriteFile(out, stale, 0o644); err != nil {
+	if err := os.WriteFile(PartPath(out), stale, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -529,5 +535,92 @@ func TestSingleStreamUnknownLengthTruncatesStaleTail(t *testing.T) {
 	}
 	if got, want := hashFile(t, out), sha256.Sum256(blob); got != want {
 		t.Errorf("output hash mismatch: got %x, want %x", got, want)
+	}
+}
+
+func TestRefuseOverwrite(t *testing.T) {
+	blob := testBlob(256 << 10)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "blob", time.Now(), bytes.NewReader(blob))
+	}))
+	defer srv.Close()
+
+	out := filepath.Join(t.TempDir(), "out.bin")
+	precious := []byte("someone else's data")
+	if err := os.WriteFile(out, precious, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d, err := New(Options{URL: srv.URL, Output: out, Client: srv.Client()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := d.Run(t.Context()); !errors.Is(err, ErrOutputExists) {
+		t.Fatalf("Run over existing file: got %v, want ErrOutputExists", err)
+	}
+	if got, _ := os.ReadFile(out); !bytes.Equal(got, precious) {
+		t.Fatal("existing file was modified by a refused run")
+	}
+
+	// Force overwrites.
+	d2, err := New(Options{URL: srv.URL, Output: out, Force: true, Client: srv.Client()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := d2.Run(t.Context()); err != nil {
+		t.Fatalf("forced Run: %v", err)
+	}
+	if got, want := hashFile(t, out), sha256.Sum256(blob); got != want {
+		t.Errorf("output hash mismatch after forced overwrite: got %x, want %x", got, want)
+	}
+}
+
+func TestRenameBlockedKeepsPartAndState(t *testing.T) {
+	// If the final name appears while the download runs, completion must
+	// refuse the rename and keep both part and sidecar, so a Force rerun
+	// resumes (instantly, if all chunks finished) and retries the rename.
+	blob := testBlob(2 << 20)
+	out := filepath.Join(t.TempDir(), "out.bin")
+	precious := []byte("appeared mid-download")
+
+	var served atomic.Int64
+	srv := blobServer(blob, `"v1"`, &served, 64<<10, func() {
+		os.WriteFile(out, precious, 0o644) // final name appears early on
+	})
+	defer srv.Close()
+
+	d, err := New(Options{URL: srv.URL, Output: out, ChunkSize: 256 << 10, Client: srv.Client()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := d.Run(t.Context()); !errors.Is(err, ErrOutputExists) {
+		t.Fatalf("Run with final name appearing: got %v, want ErrOutputExists", err)
+	}
+	if got, _ := os.ReadFile(out); !bytes.Equal(got, precious) {
+		t.Fatal("pre-existing final file was clobbered")
+	}
+	for _, kept := range []string{PartPath(out), StatePath(out)} {
+		if _, err := os.Stat(kept); err != nil {
+			t.Fatalf("%s not kept after blocked rename: %v", kept, err)
+		}
+	}
+
+	// Force rerun: resumes from the completed part and renames over.
+	before := served.Load()
+	d2, err := New(Options{URL: srv.URL, Output: out, Force: true, Client: srv.Client()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := d2.Run(t.Context()); err != nil {
+		t.Fatalf("forced rerun: %v", err)
+	}
+	if got, want := hashFile(t, out), sha256.Sum256(blob); got != want {
+		t.Errorf("output hash mismatch after forced rerun: got %x, want %x", got, want)
+	}
+	if delta := served.Load() - before; delta > 64<<10 {
+		t.Errorf("forced rerun re-downloaded %d bytes; expected an (almost) instant resume", delta)
+	}
+	if _, err := os.Stat(PartPath(out)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("part file still present after completion: %v", err)
 	}
 }

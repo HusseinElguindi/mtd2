@@ -40,6 +40,13 @@ func StatePath(output string) string {
 	return output + ".mtd.json"
 }
 
+// PartPath returns the path of the staging file for an output path. All
+// download writes land here; the output name itself is created only by the
+// rename on completion, so a file at the final name is always complete.
+func PartPath(output string) string {
+	return output + ".mtd.part"
+}
+
 // loadState reads the state file at path. It returns (nil, nil) if the
 // file does not exist; a corrupt file is an error rather than a silent
 // restart so the user decides what to do with the partial download.

@@ -80,6 +80,12 @@ type chunk struct {
 	active atomic.Bool // a worker is currently fetching this chunk
 }
 
+// ErrOutputExists is returned (wrapped) when the output path already holds
+// a file and Force is not set. The final name is only ever created by the
+// completion rename, so an existing file is a finished download or an
+// unrelated file — either way not something to clobber silently.
+var ErrOutputExists = errors.New("output file already exists")
+
 // Options configures a Downloader.
 type Options struct {
 	// URL is the resource to download. Required.
@@ -93,6 +99,9 @@ type Options struct {
 	// Client is the HTTP client used for all requests; all workers share
 	// it so connections are pooled. Defaults to http.DefaultClient.
 	Client *http.Client
+	// Force permits overwriting an existing file at Output, both at start
+	// and at the completion rename.
+	Force bool
 }
 
 // NewClient returns the HTTP client the downloader uses by default,
@@ -283,6 +292,15 @@ func New(opts Options) (*Downloader, error) {
 // Run probes the server and downloads the resource to the output file,
 // blocking until the download completes, fails, or ctx is cancelled.
 func (d *Downloader) Run(ctx context.Context) error {
+	// Overwrite protection, before any network traffic: refuse an existing
+	// final file even when a resumable .part exists — a completed file at
+	// the target name is a conflict the user must resolve, not race.
+	if !d.opts.Force {
+		if _, err := os.Stat(d.opts.Output); err == nil {
+			return fmt.Errorf("%w: %s", ErrOutputExists, d.opts.Output)
+		}
+	}
+
 	probe, err := Probe(ctx, d.client, d.opts.URL)
 	if err != nil {
 		return err
@@ -291,7 +309,8 @@ func (d *Downloader) Run(ctx context.Context) error {
 	d.origProbe = probe
 	d.setFetchURL(probe.FinalURL)
 
-	f, err := os.OpenFile(d.opts.Output, os.O_RDWR|os.O_CREATE, 0o644)
+	part := PartPath(d.opts.Output)
+	f, err := os.OpenFile(part, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		return err
 	}
@@ -302,9 +321,11 @@ func (d *Downloader) Run(ctx context.Context) error {
 			return err
 		}
 		// A stale state file (from when the server still supported
-		// ranges) describes data this full re-download just replaced.
+		// ranges) describes data this full re-download just replaced —
+		// remove it regardless of how the rename below goes, or a rerun
+		// would "resume" the fresh part against obsolete counters.
 		os.Remove(StatePath(d.opts.Output))
-		return f.Close()
+		return d.finalize(f)
 	}
 
 	// Resume: a valid state file restores each chunk's done counter (and
@@ -320,14 +341,14 @@ func (d *Downloader) Run(ctx context.Context) error {
 		if err := st.validate(d.opts.URL, probe); err != nil {
 			return err
 		}
-		// The state's done counters describe bytes already in the output
+		// The state's done counters describe bytes already in the part
 		// file, so the pair must match locally too: a deleted or resized
-		// output with a leftover sidecar would "resume" into a hole-filled
+		// part with a leftover sidecar would "resume" into a hole-filled
 		// file and report success. This check must precede the Truncate
 		// below, which would silence it by resizing the file.
 		if fi, err := f.Stat(); err != nil || fi.Size() != st.Size {
-			return fmt.Errorf("%w: output file %s does not match the saved state (delete %s to restart)",
-				ErrStateMismatch, d.opts.Output, statePath)
+			return fmt.Errorf("%w: %s does not match the saved state (delete %s to restart)",
+				ErrStateMismatch, part, statePath)
 		}
 		cs = st.ChunkSize
 	}
@@ -338,7 +359,7 @@ func (d *Downloader) Run(ctx context.Context) error {
 	// with sparse-file support the file is holes, so a partial-page write
 	// into a never-written region doesn't trigger a read of existing data.
 	if err := f.Truncate(probe.Size); err != nil {
-		return fmt.Errorf("preallocate %s: %w", d.opts.Output, err)
+		return fmt.Errorf("preallocate %s: %w", part, err)
 	}
 	d.chunks = buildChunks(probe.Size, cs)
 	if st != nil {
@@ -382,8 +403,33 @@ func (d *Downloader) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Rename before removing the sidecar: if the rename is blocked, part
+	// and state survive together, so a Force rerun resumes instantly (all
+	// chunks done) and retries only the rename.
+	if err := d.finalize(f); err != nil {
+		return err
+	}
 	os.Remove(statePath)
-	return f.Close()
+	return nil
+}
+
+// finalize closes the part file and moves it to the final name. The
+// re-check narrows the race where the final name appeared during the
+// download — os.Rename would clobber it silently. On refusal the part
+// (and, in the chunked path, the sidecar) are left in place, so no
+// completed data is ever lost.
+func (d *Downloader) finalize(f *os.File) error {
+	if err := f.Close(); err != nil {
+		return err
+	}
+	part := PartPath(d.opts.Output)
+	if !d.opts.Force {
+		if _, err := os.Stat(d.opts.Output); err == nil {
+			return fmt.Errorf("%w: %s appeared during the download; the completed data is kept at %s",
+				ErrOutputExists, d.opts.Output, part)
+		}
+	}
+	return os.Rename(part, d.opts.Output)
 }
 
 // chunkSize returns the configured chunk size, or the size-derived default:
@@ -558,7 +604,7 @@ func (d *Downloader) singleStream(ctx context.Context, f *os.File) error {
 
 	if size > 0 {
 		if err := f.Truncate(size); err != nil {
-			return fmt.Errorf("preallocate %s: %w", d.opts.Output, err)
+			return fmt.Errorf("preallocate %s: %w", PartPath(d.opts.Output), err)
 		}
 	}
 	if err := d.copyToFile(f, resp.Body, 0, &c.done); err != nil {
@@ -573,7 +619,7 @@ func (d *Downloader) singleStream(ctx context.Context, f *os.File) error {
 		// bytes), so a shorter re-download over a longer earlier attempt
 		// would leave the old tail dangling past the new end — cut it.
 		if err := f.Truncate(c.done.Load()); err != nil {
-			return fmt.Errorf("truncate %s: %w", d.opts.Output, err)
+			return fmt.Errorf("truncate %s: %w", PartPath(d.opts.Output), err)
 		}
 	}
 	return nil

@@ -201,7 +201,7 @@ func TestCorruptStateFile(t *testing.T) {
 }
 
 func TestResumeMissingOutput(t *testing.T) {
-	// A leftover sidecar with a deleted output file must refuse to resume:
+	// A leftover sidecar with a deleted part file must refuse to resume:
 	// restoring the done counters into a fresh sparse file would produce a
 	// file of zeros reported as a successful download.
 	blob := testBlob(2 << 20)
@@ -218,8 +218,8 @@ func TestResumeMissingOutput(t *testing.T) {
 	if err := d.Run(ctx); err == nil {
 		t.Fatal("Run: expected cancellation error, got nil")
 	}
-	if err := os.Remove(out); err != nil {
-		t.Fatalf("remove output: %v", err)
+	if err := os.Remove(PartPath(out)); err != nil {
+		t.Fatalf("remove part file: %v", err)
 	}
 
 	d2, err := New(Options{URL: srv.URL, Output: out, Client: srv.Client()})

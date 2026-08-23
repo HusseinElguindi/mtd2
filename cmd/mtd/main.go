@@ -50,9 +50,10 @@ func main() {
 	concurrency := flag.Int("c", 8, "number of parallel connections")
 	chunkSize := flag.String("s", "", "chunk size, e.g. 16MiB (default: derived from file size)")
 	restart := flag.Bool("restart", false, "discard any saved state and partial file, start over")
+	force := flag.Bool("f", false, "overwrite an existing output file")
 	verbose := flag.Bool("v", false, "dump HTTP request/response headers to stderr")
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "usage: mtd [-o output] [-c concurrency] [-s chunk-size] [--restart] <url>\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "usage: mtd [-o output] [-c concurrency] [-s chunk-size] [-f] [--restart] <url>\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -60,13 +61,13 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
-	if err := run(flag.Arg(0), *output, *concurrency, *chunkSize, *restart, *verbose); err != nil {
+	if err := run(flag.Arg(0), *output, *concurrency, *chunkSize, *restart, *force, *verbose); err != nil {
 		fmt.Fprintln(os.Stderr, "mtd:", err)
 		os.Exit(1)
 	}
 }
 
-func run(rawURL, output string, concurrency int, chunkSizeArg string, restart, verbose bool) error {
+func run(rawURL, output string, concurrency int, chunkSizeArg string, restart, force, verbose bool) error {
 	if output == "" {
 		var err error
 		if output, err = defaultOutput(rawURL); err != nil {
@@ -81,7 +82,9 @@ func run(rawURL, output string, concurrency int, chunkSizeArg string, restart, v
 		}
 	}
 	if restart {
-		os.Remove(output)
+		// Restart discards this download's own artifacts; a file at the
+		// final name is someone's completed data and still requires -f.
+		os.Remove(downloader.PartPath(output))
 		os.Remove(downloader.StatePath(output))
 	}
 
@@ -100,6 +103,7 @@ func run(rawURL, output string, concurrency int, chunkSizeArg string, restart, v
 		Concurrency: concurrency,
 		ChunkSize:   chunkSize,
 		Client:      client,
+		Force:       force,
 	})
 	if err != nil {
 		return err
@@ -129,6 +133,9 @@ loop:
 	r.finish()
 
 	if runErr != nil {
+		if errors.Is(runErr, downloader.ErrOutputExists) {
+			return fmt.Errorf("%w — use -o for a different name, -f to overwrite, or --restart to discard a partial download", runErr)
+		}
 		if errors.Is(runErr, context.Canceled) {
 			if _, err := os.Stat(downloader.StatePath(output)); err == nil {
 				return fmt.Errorf("interrupted — progress saved; rerun the same command to resume")
