@@ -180,6 +180,10 @@ type Downloader struct {
 	// resume validation).
 	fetchMu  sync.Mutex
 	fetchURL string
+
+	// origProbe is the session's first probe; URL refreshes are accepted
+	// only when a fresh probe still matches it (see probeMatches).
+	origProbe ProbeResult
 }
 
 func (d *Downloader) getFetchURL() string {
@@ -199,9 +203,32 @@ func (d *Downloader) setFetchURL(u string) {
 // failed refresh keeps the current URL — the retry then fails through the
 // normal path with the real error.
 func (d *Downloader) refreshFetchURL(ctx context.Context) {
-	if probe, err := Probe(ctx, d.client, d.opts.URL); err == nil && probe.FinalURL != "" {
+	probe, err := Probe(ctx, d.client, d.opts.URL)
+	if err != nil || probe.FinalURL == "" {
+		return
+	}
+	// Adopt the fresh URL only if it still describes the same resource: a
+	// re-mint resolving to different content (origin file changed, another
+	// variant) must not be spliced into the existing chunk grid — that
+	// would mix bytes of two files and report success.
+	if probeMatches(d.origProbe, probe) {
 		d.setFetchURL(probe.FinalURL)
 	}
+}
+
+// probeMatches reports whether two probes plausibly describe the same
+// resource: sizes must match, and each validator is compared when both
+// probes carry it.
+func probeMatches(a, b ProbeResult) bool {
+	switch {
+	case a.Size != b.Size:
+		return false
+	case a.ETag != "" && b.ETag != "" && a.ETag != b.ETag:
+		return false
+	case a.LastModified != "" && b.LastModified != "" && a.LastModified != b.LastModified:
+		return false
+	}
+	return true
 }
 
 // New returns a Downloader for the given options, applying defaults.
@@ -240,6 +267,7 @@ func (d *Downloader) Run(ctx context.Context) error {
 		return err
 	}
 	d.size = probe.Size
+	d.origProbe = probe
 	d.setFetchURL(probe.FinalURL)
 
 	f, err := os.OpenFile(d.opts.Output, os.O_RDWR|os.O_CREATE, 0o644)

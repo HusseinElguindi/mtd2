@@ -401,3 +401,55 @@ func TestServerIgnoresRangeStart(t *testing.T) {
 		t.Fatalf("Run = %v, want a range-start mismatch error", err)
 	}
 }
+
+func TestRefreshRejectsChangedResource(t *testing.T) {
+	// A chunk retry re-probes the entry URL for a fresh ticket. If that
+	// re-probe resolves to DIFFERENT content (origin changed mid-download),
+	// the new URL must be rejected — splicing two files together would
+	// corrupt the output silently.
+	blobV1 := testBlob(512 << 10)
+	blobV2 := bytes.ToUpper(blobV1) // same size, different content
+
+	var probes, v1Fails atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
+		if probes.Add(1) == 1 {
+			http.Redirect(w, r, "/v1/ticket", http.StatusFound)
+		} else {
+			http.Redirect(w, r, "/v2/ticket", http.StatusFound) // re-mint: new resource
+		}
+	})
+	mux.HandleFunc("/v1/ticket", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "bytes=0-0" && v1Fails.Add(1) == 1 {
+			// Truncate the first chunk request to force a retry (and with
+			// it a refresh probe).
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", len(blobV1)-1, len(blobV1)))
+			w.WriteHeader(http.StatusPartialContent)
+			w.Write(blobV1[:100])
+			return
+		}
+		w.Header().Set("ETag", `"v1"`)
+		http.ServeContent(w, r, "blob", time.Time{}, bytes.NewReader(blobV1))
+	})
+	mux.HandleFunc("/v2/ticket", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"v2"`)
+		http.ServeContent(w, r, "blob", time.Time{}, bytes.NewReader(blobV2))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	out := filepath.Join(t.TempDir(), "out.bin")
+	d, err := New(Options{URL: srv.URL + "/start", Output: out, Concurrency: 1, ChunkSize: 512 << 10, Client: srv.Client()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := d.Run(t.Context()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got, want := hashFile(t, out), sha256.Sum256(blobV1); got != want {
+		t.Errorf("output does not match the ORIGINAL content: the refresh adopted a changed resource")
+	}
+	if probes.Load() < 2 {
+		t.Errorf("refresh probe never happened (probes=%d); test exercised nothing", probes.Load())
+	}
+}
