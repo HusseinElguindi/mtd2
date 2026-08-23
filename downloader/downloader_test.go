@@ -493,3 +493,41 @@ func TestNoRefreshOnBodyError(t *testing.T) {
 		t.Errorf("entry URL hit %d times, want 1: an I/O error triggered a refresh probe", n)
 	}
 }
+
+func TestSingleStreamUnknownLengthTruncatesStaleTail(t *testing.T) {
+	// No range support AND no Content-Length: the body alone defines the
+	// size. A longer previous attempt's bytes must not survive past the
+	// new end of file.
+	blob := testBlob(256 << 10)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Flush mid-body to force chunked encoding (ContentLength -1).
+		w.Write(blob[:len(blob)/2])
+		w.(http.Flusher).Flush()
+		w.Write(blob[len(blob)/2:])
+	}))
+	defer srv.Close()
+
+	out := filepath.Join(t.TempDir(), "out.bin")
+	stale := bytes.Repeat([]byte{0xAA}, len(blob)*2) // longer earlier attempt
+	if err := os.WriteFile(out, stale, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d, err := New(Options{URL: srv.URL, Output: out, Client: srv.Client()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := d.Run(t.Context()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	fi, err := os.Stat(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Size() != int64(len(blob)) {
+		t.Errorf("output size = %d, want %d (stale tail not truncated)", fi.Size(), len(blob))
+	}
+	if got, want := hashFile(t, out), sha256.Sum256(blob); got != want {
+		t.Errorf("output hash mismatch: got %x, want %x", got, want)
+	}
+}

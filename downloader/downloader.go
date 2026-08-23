@@ -567,5 +567,14 @@ func (d *Downloader) singleStream(ctx context.Context, f *os.File) error {
 	if size > 0 && c.done.Load() < size {
 		return fmt.Errorf("body ended early: %d of %d bytes", c.done.Load(), size)
 	}
+	if size <= 0 {
+		// Unknown length: the body defines the file's size. The file is
+		// opened without O_TRUNC (ranged resumes depend on keeping their
+		// bytes), so a shorter re-download over a longer earlier attempt
+		// would leave the old tail dangling past the new end — cut it.
+		if err := f.Truncate(c.done.Load()); err != nil {
+			return fmt.Errorf("truncate %s: %w", d.opts.Output, err)
+		}
+	}
 	return nil
 }
