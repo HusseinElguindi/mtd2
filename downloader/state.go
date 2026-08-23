@@ -68,7 +68,8 @@ func (st *state) validate(url string, probe ProbeResult) error {
 	case st.Size != probe.Size:
 		return fmt.Errorf("%w: size changed from %d to %d", ErrStateMismatch, st.Size, probe.Size)
 	case st.ETag != "" && probe.ETag != "" && st.ETag != probe.ETag:
-		return fmt.Errorf("%w: ETag changed from %q to %q", ErrStateMismatch, st.ETag, probe.ETag)
+		// ETags arrive already quoted, so %s keeps the message readable.
+		return fmt.Errorf("%w: ETag changed from %s to %s", ErrStateMismatch, st.ETag, probe.ETag)
 	case st.LastModified != "" && probe.LastModified != "" && st.LastModified != probe.LastModified:
 		return fmt.Errorf("%w: Last-Modified changed from %q to %q", ErrStateMismatch, st.LastModified, probe.LastModified)
 	case st.ChunkSize <= 0:
