@@ -199,3 +199,34 @@ func TestCorruptStateFile(t *testing.T) {
 		t.Errorf("missing state file: got st=%v err=%v, want nil, nil", st, err)
 	}
 }
+
+func TestResumeMissingOutput(t *testing.T) {
+	// A leftover sidecar with a deleted output file must refuse to resume:
+	// restoring the done counters into a fresh sparse file would produce a
+	// file of zeros reported as a successful download.
+	blob := testBlob(2 << 20)
+	out := filepath.Join(t.TempDir(), "out.bin")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	var served atomic.Int64
+	srv := blobServer(blob, `"v1"`, &served, 256<<10, cancel)
+	defer srv.Close()
+	d, err := New(Options{URL: srv.URL, Output: out, ChunkSize: 256 << 10, Client: srv.Client()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := d.Run(ctx); err == nil {
+		t.Fatal("Run: expected cancellation error, got nil")
+	}
+	if err := os.Remove(out); err != nil {
+		t.Fatalf("remove output: %v", err)
+	}
+
+	d2, err := New(Options{URL: srv.URL, Output: out, Client: srv.Client()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := d2.Run(t.Context()); !errors.Is(err, ErrStateMismatch) {
+		t.Fatalf("resume with deleted output: got %v, want ErrStateMismatch", err)
+	}
+}
