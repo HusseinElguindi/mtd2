@@ -404,6 +404,16 @@ func (d *Downloader) fetchChunk(ctx context.Context, f *os.File, c *chunk) error
 	if resp.StatusCode != http.StatusPartialContent {
 		return fmt.Errorf("range request: unexpected status %s", resp.Status)
 	}
+	// A 206 alone doesn't prove the server honored our start offset: one
+	// that ignores the range start (easiest to hit on a retry, where
+	// start sits mid-chunk) would have its byte 0 written at our offset,
+	// corrupting the file with no error. Require the echoed start.
+	switch gotStart, err := parseContentRangeStart(resp.Header.Get("Content-Range")); {
+	case err != nil:
+		return fmt.Errorf("range request: %w", err)
+	case gotStart != start:
+		return fmt.Errorf("range request: server range starts at %d, requested %d", gotStart, start)
+	}
 
 	// Bound the body to the bytes we asked for: a server that honors the
 	// range start but streams to EOF would otherwise be written past the

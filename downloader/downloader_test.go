@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -372,5 +373,31 @@ func TestServerIgnoresRangeEnd(t *testing.T) {
 		if got := c.done.Load(); got != c.length {
 			t.Errorf("chunk %d done = %d, want exactly %d (over-delivery not bounded?)", c.index, got, c.length)
 		}
+	}
+}
+
+func TestServerIgnoresRangeStart(t *testing.T) {
+	// A 206 whose Content-Range starts at 0 when we asked mid-file must be
+	// rejected, not written at the requested offset.
+	blob := testBlob(1 << 20)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") == "bytes=0-0" {
+			http.ServeContent(w, r, "blob", time.Now(), bytes.NewReader(blob)) // honest probe
+			return
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", len(blob)-1, len(blob)))
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write(blob) // ignores the requested start entirely
+	}))
+	defer srv.Close()
+
+	out := filepath.Join(t.TempDir(), "out.bin")
+	d, err := New(Options{URL: srv.URL, Output: out, ChunkSize: 256 << 10, Client: srv.Client()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	err = d.Run(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "server range starts at") {
+		t.Fatalf("Run = %v, want a range-start mismatch error", err)
 	}
 }

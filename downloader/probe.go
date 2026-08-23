@@ -86,6 +86,24 @@ func responseDetail(resp *http.Response) string {
 	return b.String()
 }
 
+// parseContentRangeStart extracts the first-byte position from a
+// Content-Range header such as "bytes 100-199/12345".
+func parseContentRangeStart(header string) (int64, error) {
+	rest, ok := strings.CutPrefix(header, "bytes ")
+	if !ok {
+		return 0, fmt.Errorf("malformed Content-Range %q", header)
+	}
+	first, _, ok := strings.Cut(rest, "-")
+	if !ok {
+		return 0, fmt.Errorf("malformed Content-Range %q", header)
+	}
+	start, err := strconv.ParseInt(first, 10, 64)
+	if err != nil || start < 0 {
+		return 0, fmt.Errorf("unusable Content-Range start %q", header)
+	}
+	return start, nil
+}
+
 // parseContentRangeTotal extracts the complete length from a Content-Range
 // header such as "bytes 0-0/12345". A total of "*" (unknown length) is an
 // error: chunked downloading needs the full size up front.
