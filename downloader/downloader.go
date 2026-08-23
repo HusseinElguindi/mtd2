@@ -433,12 +433,16 @@ func (d *Downloader) finalize(f *os.File) error {
 }
 
 // chunkSize returns the configured chunk size, or the size-derived default:
-// ~4 chunks per worker, clamped to [minChunkSize, maxChunkSize].
+// ~4 chunks per worker, rounded down to a whole MiB and clamped to
+// [minChunkSize, maxChunkSize]. The MiB rounding keeps chunk offsets
+// page-aligned on every supported page size (4 KiB, 16 KiB), which the
+// write path's full-page-write argument depends on; an explicit ChunkSize
+// override is taken as-is.
 func (d *Downloader) chunkSize(size int64) int64 {
 	if d.opts.ChunkSize > 0 {
 		return d.opts.ChunkSize
 	}
-	cs := size / int64(d.opts.Concurrency*4)
+	cs := size / int64(d.opts.Concurrency*4) &^ (1<<20 - 1)
 	return min(max(cs, minChunkSize), maxChunkSize)
 }
 

@@ -127,9 +127,11 @@ func TestChunkMath(t *testing.T) {
 	tests := []struct {
 		size, want int64
 	}{
-		{1 << 20, minChunkSize}, // tiny file clamps up
-		{1 << 30, 1 << 30 / 32}, // 1 GiB / (8*4) = 32 MiB, in range
-		{1 << 40, maxChunkSize}, // huge file clamps down
+		{1 << 20, minChunkSize},   // tiny file clamps up
+		{1 << 30, 1 << 30 / 32},   // 1 GiB / (8*4) = 32 MiB, in range
+		{1 << 40, maxChunkSize},   // huge file clamps down
+		{1_000_000_000, 29 << 20}, // 1e9/32 = 31250000 -> floor to whole MiB
+		{999 << 20, 31 << 20},     // uneven division still lands on a MiB
 	}
 	for _, tt := range tests {
 		if got := d.chunkSize(tt.size); got != tt.want {
