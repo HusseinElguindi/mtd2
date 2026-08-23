@@ -1,0 +1,8 @@
+# Built binaries
+/mtd
+/mtdserve
+/bin/
+
+# Downloaded test blobs and partial downloads
+*.blob
+*.mtd.json

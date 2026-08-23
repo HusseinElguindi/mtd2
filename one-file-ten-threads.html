@@ -1,0 +1,649 @@
+<title>One File, Ten Threads</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=JetBrains+Mono:wght@400;700&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&display=swap">
+
+<style>
+:root {
+  --bg:        #EDEFF1;
+  --surface:   #FBFCFC;
+  --surface-2: #E4E7EA;
+  --ink:       #14181C;
+  --ink-2:     #59636E;
+  --ink-3:     #8A939D;
+  --rule:      #D3D8DD;
+  --rule-hard: #B7BFC7;
+  --accent:    #3A4FA0;
+  --accent-sf: #E2E6F5;
+  --good:      #2E6B4F;
+  --bad:       #9B3B2E;
+  --warn:      #8A6A1E;
+
+  --display: "IBM Plex Sans Condensed", "Helvetica Neue", Arial, sans-serif;
+  --body: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --col: 68ch;
+  --wide: 62rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:        #101317;
+    --surface:   #171B21;
+    --surface-2: #1F242B;
+    --ink:       #E4E8EC;
+    --ink-2:     #929DA9;
+    --ink-3:     #6B7681;
+    --rule:      #262C34;
+    --rule-hard: #38414B;
+    --accent:    #8DA0F0;
+    --accent-sf: #1C2338;
+    --good:      #5FBF8F;
+    --bad:       #E08B7A;
+    --warn:      #D6B45E;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg:        #101317;
+  --surface:   #171B21;
+  --surface-2: #1F242B;
+  --ink:       #E4E8EC;
+  --ink-2:     #929DA9;
+  --ink-3:     #6B7681;
+  --rule:      #262C34;
+  --rule-hard: #38414B;
+  --accent:    #8DA0F0;
+  --accent-sf: #1C2338;
+  --good:      #5FBF8F;
+  --bad:       #E08B7A;
+  --warn:      #D6B45E;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--body);
+  font-size: 17px;
+  line-height: 1.62;
+  margin: 0;
+  padding: 0 1.5rem 8rem;
+  -webkit-font-smoothing: antialiased;
+}
+
+.sheet {
+  max-width: var(--wide);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3.25rem;
+}
+
+/* ---------- masthead ---------- */
+
+.masthead {
+  padding-top: 4.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.75rem;
+}
+
+.eyebrow {
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0;
+}
+
+h1 {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: clamp(2.9rem, 8vw, 4.75rem);
+  line-height: 0.96;
+  letter-spacing: -0.018em;
+  text-wrap: balance;
+  margin: 0;
+}
+
+.thesis {
+  font-size: 1.2rem;
+  line-height: 1.5;
+  color: var(--ink-2);
+  max-width: 46ch;
+  margin: 0;
+}
+.thesis strong { color: var(--ink); font-weight: 600; }
+
+.env {
+  border-top: 1px solid var(--rule-hard);
+  border-bottom: 1px solid var(--rule-hard);
+  padding: 1.1rem 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 1rem 2rem;
+}
+.env div { display: flex; flex-direction: column; gap: 0.2rem; }
+.env dt, .env .k {
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 0.66rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.env .v {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  color: var(--ink);
+}
+
+/* ---------- sections ---------- */
+
+section { display: flex; flex-direction: column; gap: 1.15rem; }
+
+h2 {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: clamp(1.6rem, 3.4vw, 2.15rem);
+  line-height: 1.1;
+  letter-spacing: -0.012em;
+  text-wrap: balance;
+  margin: 0;
+  padding-top: 1.25rem;
+  border-top: 2px solid var(--ink);
+}
+
+h3 {
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 1.06rem;
+  letter-spacing: 0.01em;
+  margin: 0.75rem 0 0;
+}
+
+p { margin: 0; max-width: var(--col); }
+p + p { margin-top: -0.15rem; }
+
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+
+code {
+  font-family: var(--mono);
+  font-size: 0.86em;
+  background: var(--surface-2);
+  padding: 0.1em 0.34em;
+  border-radius: 3px;
+}
+
+ul, ol { max-width: var(--col); margin: 0; padding-left: 1.15rem; display: flex; flex-direction: column; gap: 0.5rem; }
+li::marker { color: var(--ink-3); }
+
+/* ---------- verdict strip ---------- */
+
+.verdict {
+  display: flex;
+  gap: 1rem;
+  align-items: baseline;
+  background: var(--surface);
+  border-left: 3px solid var(--accent);
+  padding: 0.95rem 1.15rem;
+  max-width: var(--wide);
+}
+.verdict .lbl {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 0.66rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  white-space: nowrap;
+  padding-top: 0.2em;
+}
+.verdict p { font-size: 1.02rem; max-width: 60ch; }
+.verdict.win { border-left-color: var(--good); }
+.verdict.win .lbl { color: var(--good); }
+.verdict.loss { border-left-color: var(--bad); }
+.verdict.loss .lbl { color: var(--bad); }
+
+/* ---------- tables ---------- */
+
+.scroller { overflow-x: auto; max-width: var(--wide); }
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  min-width: 34rem;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+caption {
+  text-align: left;
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 0.7rem;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  padding-bottom: 0.6rem;
+}
+th {
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 0.68rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  text-align: right;
+  padding: 0 0.75rem 0.5rem;
+  border-bottom: 1px solid var(--rule-hard);
+  white-space: nowrap;
+}
+th:first-child, td:first-child { text-align: left; padding-left: 0; }
+th:last-child, td:last-child { padding-right: 0; }
+td {
+  text-align: right;
+  padding: 0.42rem 0.75rem;
+  border-bottom: 1px solid var(--rule);
+  white-space: nowrap;
+}
+tbody tr:last-child td { border-bottom: 1px solid var(--rule-hard); }
+tr.hi td { background: var(--accent-sf); }
+tr.hi td:first-child { font-weight: 700; }
+
+.bar-cell { width: 30%; min-width: 6rem; }
+.bar {
+  display: block;
+  height: 7px;
+  width: calc(var(--v) * 100%);
+  min-width: 2px;
+  background: var(--accent);
+  border-radius: 1px;
+}
+.bar.g { background: var(--good); }
+.bar.r { background: var(--bad); }
+.dim { color: var(--ink-3); }
+
+/* ---------- code ---------- */
+
+pre {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  line-height: 1.66;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--rule-hard);
+  padding: 1rem 1.15rem;
+  margin: 0;
+  overflow-x: auto;
+  max-width: var(--wide);
+  tab-size: 4;
+}
+pre code { background: none; padding: 0; font-size: inherit; }
+pre .c { color: var(--ink-3); font-style: italic; }
+pre .k { color: var(--accent); }
+pre .s { color: var(--good); }
+pre .hl { background: var(--accent-sf); display: inline-block; width: 100%; }
+
+/* ---------- cause list ---------- */
+
+.causes { display: flex; flex-direction: column; gap: 0; max-width: var(--wide); }
+.cause {
+  display: grid;
+  grid-template-columns: 7.5rem 1fr;
+  gap: 0 1.5rem;
+  padding: 0.95rem 0;
+  border-bottom: 1px solid var(--rule);
+  align-items: start;
+}
+.cause:first-child { border-top: 1px solid var(--rule); }
+.weight {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 0.66rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding-top: 0.35em;
+}
+.weight.dominant { color: var(--bad); }
+.weight.real { color: var(--warn); }
+.weight.none { color: var(--ink-3); }
+.cause .what { margin: 0; max-width: 62ch; }
+.cause .what b { font-weight: 600; }
+
+/* ---------- timeline ---------- */
+
+.tl { display: flex; flex-direction: column; gap: 0; max-width: var(--wide); }
+.tl-row {
+  display: grid;
+  grid-template-columns: 6.5rem 9rem 1fr;
+  gap: 0 1.25rem;
+  padding: 0.7rem 0;
+  border-bottom: 1px solid var(--rule);
+  align-items: baseline;
+}
+.tl-row:first-child { border-top: 1px solid var(--rule-hard); }
+.tl-when { font-family: var(--mono); font-size: 0.78rem; color: var(--ink-3); }
+.tl-what { font-family: var(--mono); font-size: 0.8rem; color: var(--accent); overflow-wrap: anywhere; }
+.tl-why { font-size: 0.94rem; color: var(--ink-2); }
+
+/* ---------- two-up ---------- */
+
+.two-up {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+  gap: 1.25rem;
+  max-width: var(--wide);
+}
+.card {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  padding: 1.1rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+.card h4 {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 0.72rem;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  margin: 0;
+  color: var(--ink-3);
+}
+.card p { font-size: 0.96rem; max-width: none; }
+.card ul { font-size: 0.94rem; gap: 0.4rem; max-width: none; }
+
+/* ---------- rules ---------- */
+
+.rules { counter-reset: r; display: flex; flex-direction: column; gap: 0; max-width: var(--wide); }
+.rule-item {
+  display: grid;
+  grid-template-columns: 2.5rem 1fr;
+  gap: 0 1rem;
+  padding: 0.85rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+.rule-item:first-child { border-top: 2px solid var(--ink); }
+.rule-item::before {
+  counter-increment: r;
+  content: counter(r, decimal-leading-zero);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--ink-3);
+  padding-top: 0.22em;
+}
+.rule-item p { max-width: 64ch; }
+.rule-item b { font-weight: 600; }
+
+footer {
+  border-top: 1px solid var(--rule-hard);
+  padding-top: 1.25rem;
+  font-size: 0.86rem;
+  color: var(--ink-3);
+  max-width: var(--wide);
+}
+footer p { max-width: 68ch; }
+
+@media (max-width: 46rem) {
+  body { font-size: 16px; padding: 0 1.1rem 5rem; }
+  .cause { grid-template-columns: 1fr; gap: 0.3rem; }
+  .tl-row { grid-template-columns: 5.5rem 1fr; }
+  .tl-why { grid-column: 1 / -1; }
+  .verdict { flex-direction: column; gap: 0.5rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+</style>
+
+<div class="sheet">
+
+<header class="masthead">
+  <p class="eyebrow">Findings notebook &middot; shared-file I/O</p>
+  <h1>One File,<br>Ten Threads</h1>
+  <p class="thesis">Re-opening a 2020 Stack Overflow question — <em>why is multi-threaded file I/O in Rust slower than Go?</em> — and answering it with measurements instead of intuition. <strong>The seek was never the problem.</strong></p>
+  <div class="env">
+    <div><span class="k">Measured on</span><span class="v">2 vCPU / 7 GB</span></div>
+    <div><span class="k">Kernel</span><span class="v">6.18.5-fc-v20</span></div>
+    <div><span class="k">Filesystem</span><span class="v">ext4 on virtio</span></div>
+    <div><span class="k">Toolchain</span><span class="v">rustc 1.95.0</span></div>
+    <div><span class="k">Question dated</span><span class="v">May 2020</span></div>
+  </div>
+</header>
+
+<section>
+  <h2>The original bug had five causes, and the suspected one was last</h2>
+  <p>The program downloaded a file in ten HTTP range requests, each thread writing its range into one shared output file. The asker's own hypothesis was that Go won because <code>syscall.Pwrite</code> is one syscall while Rust needed <code>seek</code> + <code>write</code>. That's a real difference. It's also the smallest thing on this list.</p>
+
+  <div class="causes">
+    <div class="cause">
+      <span class="weight dominant">Dominant</span>
+      <p class="what"><b>The mutex serialized the downloads, not just the writes.</b> <code>Arc&lt;Mutex&lt;File&gt;&gt;</code> held across seek-and-write means ten threads take turns at the one thing they were parallelized to avoid. This is why "open the file separately in each thread with no locking" was mysteriously the fastest attempt — it deleted the contention.</p>
+    </div>
+    <div class="cause">
+      <span class="weight dominant">Dominant</span>
+      <p class="what"><b>The program was network-bound the whole time.</b> At 100 MB/s, pulling 64 KiB off the wire takes ~640 µs. The syscall under suspicion costs ~2.3 µs. Tuning it optimizes 0.4% of the work.</p>
+    </div>
+    <div class="cause">
+      <span class="weight real">Real bug</span>
+      <p class="what"><b><code>BufWriter</code> and <code>BufReader</code> were doing nothing.</b> Both were sized equal to the I/O size. A write at or above capacity bypasses the buffer and goes straight to the kernel — so the wrapper was pure overhead with none of the benefit. Confirmed under <code>strace</code>.</p>
+    </div>
+    <div class="cause">
+      <span class="weight real">Real bug</span>
+      <p class="what"><b><code>write</code> was used where <code>write_all</code> was needed.</b> <code>Write::write</code> may write fewer bytes than you handed it and return that count; ignoring it silently corrupts the output. Go's <code>File.WriteAt</code> loops internally and errors on a short write — so the Go version didn't have this bug, and a correctness gap was quietly masquerading as a performance gap.</p>
+    </div>
+    <div class="cause">
+      <span class="weight none">Negligible</span>
+      <p class="what"><b>The extra <code>lseek</code>.</b> Measured below. It costs 98 ns and adds 3–6% to a 64 KiB write — a rounding error against everything above it.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Evidence: the seek costs 98 nanoseconds</h2>
+  <p>Isolating the syscalls, 64 KiB per operation, page cache in play:</p>
+
+  <div class="scroller">
+    <table>
+      <caption>Write path cost per operation</caption>
+      <thead>
+        <tr><th>Operation</th><th>Per op</th><th class="bar-cell">Relative</th><th>Note</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>lseek alone</td><td>0.098 µs</td><td class="bar-cell"><span class="bar" style="--v:0.040"></span></td><td class="dim">the entire suspect</td></tr>
+        <tr><td>lseek + write</td><td>2.32–2.42 µs</td><td class="bar-cell"><span class="bar" style="--v:0.979"></span></td><td class="dim">two syscalls</td></tr>
+        <tr class="hi"><td>pwrite</td><td>2.25–2.28 µs</td><td class="bar-cell"><span class="bar" style="--v:0.936"></span></td><td class="dim">one syscall</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="verdict">
+    <span class="lbl">Verdict</span>
+    <p>Collapsing two syscalls into one saves 3–6% of the write, which is roughly 0.015% of the time to pull that data over a 100 MB/s link. The hypothesis was correct in mechanism and wrong in magnitude.</p>
+  </div>
+
+  <h3>And the buffer was a no-op</h3>
+  <p>Ten 64 KiB <code>write_all</code> calls through a <code>BufWriter</code>, counted with <code>strace -f -e trace=write -c</code>:</p>
+
+  <div class="scroller">
+    <table>
+      <caption>BufWriter bypass threshold</caption>
+      <thead>
+        <tr><th>Capacity</th><th>Writes issued</th><th>write syscalls</th><th>Effect</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>65 536 B</td><td>10 × 64 KiB</td><td>10</td><td class="dim">buffer bypassed entirely</td></tr>
+        <tr class="hi"><td>1 048 576 B</td><td>10 × 64 KiB</td><td>1</td><td class="dim">buffer actually works</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>A buffer only buffers when it is larger than the writes you push through it. Sized at exactly the I/O size, it is a memcpy you pay for and never amortize.</p>
+</section>
+
+<section>
+  <h2>The fix is positional I/O, and it shipped in 2017</h2>
+  <p><code>FileExt::write_all_at</code> takes <code>&amp;self</code>, not <code>&amp;mut self</code>, and does not touch the file cursor. That means an <code>Arc&lt;File&gt;</code> is safely shareable across every thread with no mutex and no per-thread handle — each thread writes to its own byte range, concurrently, and nobody contends on anything.</p>
+
+  <pre><code><span class="c">// One shared handle. No Mutex. No cursor. No BufWriter.</span>
+<span class="k">use</span> std::os::unix::fs::FileExt;
+<span class="k">const</span> CHUNK: <span class="k">usize</span> = 256 * 1024;
+
+<span class="k">let</span> file = Arc::new(File::create(&amp;out)?);
+file.set_len(len)?;                <span class="c">// preallocate; avoids i_size locking</span>
+<span class="k">let</span> part = len.div_ceil(threads);
+
+std::thread::scope(|s| {           <span class="c">// per range:</span>
+    <span class="k">let</span> resp = ureq::get(url)
+        .header(<span class="s">"Range"</span>, &amp;<span class="k">format!</span>(<span class="s">"bytes={start}-{end}"</span>))
+        .call()?;
+    <span class="k">let</span> <span class="k">mut</span> body = resp.into_body().into_reader();
+    <span class="k">let</span> <span class="k">mut</span> buf = <span class="k">vec!</span>[0u8; CHUNK];
+    <span class="k">let</span> <span class="k">mut</span> off = start;
+    <span class="k">loop</span> {
+        <span class="k">let</span> n = body.read(&amp;<span class="k">mut</span> buf)?;
+        <span class="k">if</span> n == 0 { <span class="k">break</span>; }
+<span class="hl">        file.write_all_at(&amp;buf[..n], off)?;   <span class="c">// ONE pwrite, no lock</span></span>
+        off += n <span class="k">as</span> u64;
+    }
+});</code></pre>
+
+  <p>Verified end to end: 50 MB pulled over ten threads against a local range-serving HTTP server, output SHA-256 matching the source.</p>
+
+  <h3>Three traps worth knowing</h3>
+  <ul>
+    <li><b>Windows is not symmetric.</b> <code>std::os::windows::fs::FileExt::seek_write</code> <em>does</em> move the cursor. It is not a drop-in <code>pwrite</code> for concurrent use on a shared handle — cross-platform code needs the <code>positioned-io</code> crate or separate handles.</li>
+    <li><b><code>O_APPEND</code> silently defeats <code>pwrite</code>.</b> The kernel ignores the offset and appends anyway. If your file-opening helper takes an <code>append: bool</code>, make sure a range downloader isn't passing <code>true</code>.</li>
+    <li><b>Preallocate with <code>set_len</code>.</b> Ten threads all extending the file fight over <code>i_size</code>; sizing it up front removes that.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>What actually changed since 2020</h2>
+  <p>Not the answer. <code>write_at</code> predates the question by three years, and the correct pattern would have worked verbatim in May 2020. What changed is everything around it — the wrong version got substantially less wrong, and the ergonomics got much better.</p>
+
+  <div class="tl">
+    <div class="tl-row"><span class="tl-when">1.15.0 &middot; 2017</span><span class="tl-what">FileExt::write_at</span><span class="tl-why">The fix was already available, three years before the question.</span></div>
+    <div class="tl-row"><span class="tl-when">1.33.0 &middot; 2019</span><span class="tl-what">write_all_at</span><span class="tl-why">Short-write-safe positional write. The version you actually want.</span></div>
+    <div class="tl-row"><span class="tl-when">1.62 &middot; 2022</span><span class="tl-what">futex Mutex / Condvar / RwLock</span><span class="tl-why">Linux locks went from a 40-byte boxed pthread mutex to 5 bytes inline. The naive locking version got cheaper on its own.</span></div>
+    <div class="tl-row"><span class="tl-when">1.63 &middot; 2022</span><span class="tl-what">std::thread::scope</span><span class="tl-why">Borrowed data across threads without Arc gymnastics — the downloader above is meaningfully shorter because of it.</span></div>
+    <div class="tl-row"><span class="tl-when">1.67 &middot; 2023</span><span class="tl-what">std::sync::mpsc → crossbeam</span><span class="tl-why">The std channel was replaced wholesale with the crossbeam implementation.</span></div>
+  </div>
+</section>
+
+<section>
+  <h2>Is Rust worth it over Go for this shape of work?</h2>
+  <p>For a range downloader specifically: the two are equivalent, and Go is easier to get right on the first try. <code>File.WriteAt</code> loops on short writes for you, goroutines are cheaper than threads, and the runtime's scheduler handles fan-out without you thinking about it. That is exactly what the 2020 result reflected — not a language performance gap, but Go's API steering the asker into the correct pattern by default while Rust's <code>Seek + Write</code> path let them build a lock around it.</p>
+  <p>Rust's edge shows up past the point where I/O stops being the bottleneck: when you're transforming bytes in flight, when allocation pressure and GC pauses start showing in tail latency, when you want the compiler to prove the sharing is sound rather than testing for it, or when you need the deep-queue asynchronous I/O below. Below that line, pick on ecosystem and team familiarity, not throughput.</p>
+</section>
+
+<section>
+  <h2>Networking ecosystems: Rust is ahead on HTTP/3, Go is ahead on everything being boring</h2>
+  <div class="two-up">
+    <div class="card">
+      <h4>Rust</h4>
+      <ul>
+        <li><code>hyper</code> 1.11.0 and <code>reqwest</code> 0.13.4 — both extremely widely deployed.</li>
+        <li><code>rustls</code> sits among the 60 most-downloaded crates; memory-safe TLS is the default rather than the adventurous option.</li>
+        <li><code>quinn</code> is mature QUIC, with <code>quinn-udp</code> shipping inside Firefox. HTTP/3 in reqwest still needs <code>RUSTFLAGS="--cfg reqwest_unstable"</code>.</li>
+        <li>Cost: async Rust is a real learning curve, and runtime choice is a commitment.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>Go</h4>
+      <ul>
+        <li><code>net/http</code> in the standard library covers most of what people import a crate for in Rust.</li>
+        <li>QUIC is the gap: <code>golang.org/x/net/quic</code> still says "not ready for production usage", and HTTP/3 in <code>net/http</code> is open with milestone <em>Unplanned</em>.</li>
+        <li>Third-party <code>quic-go</code> is the practical answer and is genuinely good.</li>
+        <li>Cost: less room to tune, and no equivalent of the deep-queue I/O story below.</li>
+      </ul>
+    </div>
+  </div>
+  <p>Go also has no io_uring in its runtime — <a href="https://github.com/golang/go/issues/31908">golang/go#31908</a> has been open since May 2019 — and the netpoller doesn't cover regular files, so a blocking file write pins an OS thread.</p>
+</section>
+
+<section>
+  <h2>io_uring: 6× the work per CPU-second, or 2× slower</h2>
+  <p>The benefit is not a property of io_uring. It is entirely determined by whether the operation genuinely blocks and how many you have in flight. Both outcomes are reproducible on the same box within minutes of each other.</p>
+
+  <h3>Where it wins: random 4 KiB reads, O_DIRECT, page cache dropped before every run</h3>
+  <div class="scroller">
+    <table>
+      <caption>40 000 random 4 KiB O_DIRECT reads over a 2 GiB file</caption>
+      <thead>
+        <tr><th>Engine</th><th>IOPS</th><th class="bar-cell">Throughput</th><th>CPU / op</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>pread, 1 thread</td><td>15.3–16.9k</td><td class="bar-cell"><span class="bar r" style="--v:0.056"></span></td><td>29.9–32.7 µs</td></tr>
+        <tr><td>pread, 4 threads</td><td>42.9k</td><td class="bar-cell"><span class="bar r" style="--v:0.150"></span></td><td>26.2 µs</td></tr>
+        <tr><td>pread, 16 threads</td><td>87.7–90.5k</td><td class="bar-cell"><span class="bar r" style="--v:0.311"></span></td><td>13.1–13.7 µs</td></tr>
+        <tr><td>pread, 64 threads</td><td>129.7–143.6k</td><td class="bar-cell"><span class="bar r" style="--v:0.477"></span></td><td>9.8–11.8 µs</td></tr>
+        <tr><td>io_uring, 1 thread, QD 4</td><td>50.6k</td><td class="bar-cell"><span class="bar g" style="--v:0.176"></span></td><td>11.4 µs</td></tr>
+        <tr><td>io_uring, 1 thread, QD 32</td><td>160.3–184.6k</td><td class="bar-cell"><span class="bar g" style="--v:0.602"></span></td><td>3.0–4.0 µs</td></tr>
+        <tr class="hi"><td>io_uring, 1 thread, QD 128</td><td>273.3–286.5k</td><td class="bar-cell"><span class="bar g" style="--v:0.977"></span></td><td>3.1–3.2 µs</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="verdict win">
+    <span class="lbl">Wins</span>
+    <p>One thread at queue depth 128 does roughly <b>2× the throughput of 64 blocking threads at a third of the CPU per operation</b> — about 6× the work per CPU-second — without 64 stacks and 64 scheduler entities. The CPU efficiency is as much the point as the throughput.</p>
+  </div>
+
+  <h3>Where it loses: buffered writes that land in page cache</h3>
+  <div class="scroller">
+    <table>
+      <caption>65 536 scattered 4 KiB buffered writes (256 MiB)</caption>
+      <thead>
+        <tr><th>Engine</th><th>IOPS</th><th class="bar-cell">Throughput</th><th>Per op</th></tr>
+      </thead>
+      <tbody>
+        <tr class="hi"><td>pwrite, 1 thread</td><td>405.9k</td><td class="bar-cell"><span class="bar g" style="--v:1.0"></span></td><td>2.46 µs</td></tr>
+        <tr><td>pwrite, 2 threads</td><td>335.7k</td><td class="bar-cell"><span class="bar g" style="--v:0.827"></span></td><td>2.98 µs</td></tr>
+        <tr><td>pwrite, 4 threads</td><td>340.6k</td><td class="bar-cell"><span class="bar g" style="--v:0.839"></span></td><td>2.94 µs</td></tr>
+        <tr><td>io_uring, QD 32</td><td>131.0k</td><td class="bar-cell"><span class="bar r" style="--v:0.323"></span></td><td>7.63 µs</td></tr>
+        <tr><td>io_uring, QD 128</td><td>187.7k</td><td class="bar-cell"><span class="bar r" style="--v:0.462"></span></td><td>5.33 µs</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="verdict loss">
+    <span class="lbl">Loses</span>
+    <p><b>io_uring was 2× slower.</b> Buffered file I/O usually can't complete inline in the ring, so the kernel punts it to <code>io-wq</code> worker threads — you pay a thread handoff to make asynchronous an operation that was never going to block. This is the result most "io_uring is faster" writeups omit.</p>
+  </div>
+
+  <h3>The costs are real</h3>
+  <ul>
+    <li><b>Buffer ownership fights Rust.</b> The kernel holds your buffer until completion, so you cannot hand it a <code>&amp;[u8]</code> and drop the future — the kernel would still be writing into freed memory. That's why <code>tokio-uring</code> uses owned-buffer APIs that give the buffer back with the result. Cancellation is the sharp edge.</li>
+    <li><b>Ecosystem split.</b> <code>compio</code>, <code>tokio-uring</code>, and <code>glommio</code> all take that part of your program off mainline tokio.</li>
+    <li><b>It gets disabled.</b> Google turned it off across ChromeOS, Android, and production after a run of exploits; <code>/proc/sys/kernel/io_uring_disabled</code> exists for exactly this, and many managed container platforms block it. You need a fallback path.</li>
+    <li><b>Linux only</b>, with behavior that genuinely varies by kernel version.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>What we'd carry forward</h2>
+  <div class="rules">
+    <div class="rule-item"><p><b>Reach for positional I/O before reaching for a lock.</b> If threads write to disjoint ranges, <code>write_all_at</code> on a shared <code>Arc&lt;File&gt;</code> needs no synchronization at all. A mutex around a file is usually a sign the wrong API was picked.</p></div>
+    <div class="rule-item"><p><b>Find the bottleneck's order of magnitude before optimizing anything.</b> A 2.3 µs syscall inside a 640 µs network read is not the problem, and no amount of correct reasoning about syscall counts changes that.</p></div>
+    <div class="rule-item"><p><b>A buffer sized to your I/O size is not a buffer.</b> Writes at or above capacity bypass it. Verify with <code>strace -c</code> rather than assuming.</p></div>
+    <div class="rule-item"><p><b>Prefer <code>write_all</code>/<code>read_exact</code> over <code>write</code>/<code>read</code>.</b> Short writes are rare enough to pass every test and real enough to corrupt production output.</p></div>
+    <div class="rule-item"><p><b>io_uring pays when the operation blocks and many are in flight</b> — O_DIRECT storage, high-connection-count servers, anything above roughly 50–100k ops/sec. It costs you when ops complete in page cache, when there are only a handful of large sequential ones, or when you're bandwidth-bound. For the downloader, its benefit is zero: ~150 write syscalls per second at 2.25 µs is 0.03% of runtime.</p></div>
+    <div class="rule-item"><p><b>Publish the box with the numbers.</b> Everything here ran on a 2 vCPU container over a virtio-backed disk, not real NVMe. The absolute IOPS are far below what a real device does; the ratios are the part that transfers, and on faster hardware the io_uring gap typically widens, since syscall overhead stays fixed while the device gets quicker.</p></div>
+  </div>
+</section>
+
+<footer>
+  <p>Source question: <em>Multi-threading I/O in Rust is slower than Go — what can I do to improve write speed?</em>, Stack Overflow, May 2020. All figures above were measured directly rather than cited; benchmark harnesses covered the write path three ways, isolated syscall cost, <code>strace</code>-counted buffer behavior, and both buffered and O_DIRECT io_uring comparisons with <code>getrusage</code>-based CPU accounting.</p>
+</footer>
+
+</div>
