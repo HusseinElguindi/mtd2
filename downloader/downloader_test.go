@@ -163,3 +163,37 @@ func TestChunkRetry(t *testing.T) {
 		t.Errorf("output hash mismatch after retry: got %x, want %x", got, want)
 	}
 }
+
+func TestRedirectWithCookie(t *testing.T) {
+	// Model the flow that 400s without a cookie jar: the entry URL 302s,
+	// Set-Cookie on the redirect carries a ticket, and the target rejects
+	// any request that doesn't present it.
+	blob := testBlob(1 << 20)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "ticket", Value: "ok", Path: "/"})
+		http.Redirect(w, r, "/blob", http.StatusFound)
+	})
+	mux.HandleFunc("/blob", func(w http.ResponseWriter, r *http.Request) {
+		if c, err := r.Cookie("ticket"); err != nil || c.Value != "ok" {
+			http.Error(w, "missing ticket", http.StatusBadRequest)
+			return
+		}
+		http.ServeContent(w, r, "blob", time.Now(), bytes.NewReader(blob))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	out := filepath.Join(t.TempDir(), "out.bin")
+	// No Client passed: this exercises the library's default (jarred) client.
+	d, err := New(Options{URL: srv.URL + "/start", Output: out, ChunkSize: 256 << 10})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := d.Run(t.Context()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got, want := hashFile(t, out), sha256.Sum256(blob); got != want {
+		t.Errorf("output hash mismatch: got %x, want %x", got, want)
+	}
+}

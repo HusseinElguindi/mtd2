@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httputil"
 	"net/url"
 	"os"
@@ -87,7 +88,14 @@ func run(rawURL, output string, concurrency int, chunkSizeArg string, restart, v
 
 	var client *http.Client
 	if verbose {
-		client = &http.Client{Transport: dumpTransport{http.DefaultTransport}}
+		// Match the library's default client (cookie jar included) with
+		// the dumping transport layered underneath, so -v changes only
+		// visibility, not behavior.
+		jar, err := cookiejar.New(nil)
+		if err != nil {
+			return err
+		}
+		client = &http.Client{Jar: jar, Transport: dumpTransport{http.DefaultTransport}}
 	}
 	d, err := downloader.New(downloader.Options{
 		URL:         rawURL,

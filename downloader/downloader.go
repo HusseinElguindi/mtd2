@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"os"
 	"sync/atomic"
 	"time"
@@ -114,7 +115,15 @@ func New(opts Options) (*Downloader, error) {
 	}
 	client := opts.Client
 	if client == nil {
-		client = http.DefaultClient
+		// A cookie jar by default: redirect-based download flows commonly
+		// Set-Cookie on the 302 (session token, signed ticket) and expect
+		// it back on the redirected request — without a jar those flows
+		// fail with opaque 4xx responses that a browser never sees.
+		jar, err := cookiejar.New(nil)
+		if err != nil {
+			return nil, err
+		}
+		client = &http.Client{Jar: jar}
 	}
 	return &Downloader{opts: opts, client: client}, nil
 }
