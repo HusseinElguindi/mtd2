@@ -71,6 +71,7 @@ type chunk struct {
 	offset int64
 	length int64
 	done   atomic.Int64
+	active atomic.Bool // a worker is currently fetching this chunk
 }
 
 // Options configures a Downloader.
@@ -97,6 +98,7 @@ type Downloader struct {
 
 	size   int64
 	chunks []*chunk
+	prog   tracker
 }
 
 // New returns a Downloader for the given options, applying defaults.
@@ -180,6 +182,9 @@ func (d *Downloader) Run(ctx context.Context) error {
 		}
 	}
 
+	stopProg := d.prog.begin(d.chunks, probe.Size)
+	defer stopProg()
+
 	stop := make(chan struct{})
 	saverDone := make(chan struct{})
 	go func() {
@@ -238,6 +243,9 @@ func buildChunks(size, chunkSize int64) []*chunk {
 // chunkRetries attempts with brief backoff. Each retry re-ranges from the
 // chunk's current done counter, so no completed bytes are re-fetched.
 func (d *Downloader) downloadChunk(ctx context.Context, f *os.File, c *chunk) error {
+	c.active.Store(true)
+	defer c.active.Store(false)
+
 	var lastErr error
 	for attempt := 1; attempt <= chunkRetries; attempt++ {
 		if attempt > 1 {
@@ -298,13 +306,18 @@ func (d *Downloader) fetchChunk(ctx context.Context, f *os.File, c *chunk) error
 // done after each write. See the writeBufSize doc comment for why the
 // buffer is 256 KiB and why full-buffer WriteAt is the shape of this loop.
 func (d *Downloader) copyToFile(f *os.File, body io.Reader, off int64, done *atomic.Int64) error {
+	src := timedReader{r: body, bytes: &d.prog.bytesRead, nanos: &d.prog.readNanos}
 	buf := make([]byte, writeBufSize)
 	for {
-		n, rerr := io.ReadFull(body, buf)
+		n, rerr := io.ReadFull(src, buf)
 		if n > 0 {
-			if _, werr := f.WriteAt(buf[:n], off); werr != nil {
+			t0 := time.Now()
+			_, werr := f.WriteAt(buf[:n], off)
+			d.prog.writeNanos.Add(time.Since(t0).Nanoseconds())
+			if werr != nil {
 				return werr
 			}
+			d.prog.bytesWrite.Add(int64(n))
 			off += int64(n)
 			done.Add(int64(n))
 		}
@@ -343,7 +356,11 @@ func (d *Downloader) singleStream(ctx context.Context, f *os.File) error {
 		size = d.size
 	}
 	c := &chunk{length: size}
+	c.active.Store(true)
+	defer c.active.Store(false)
 	d.chunks = []*chunk{c}
+	stopProg := d.prog.begin(d.chunks, max(size, 0))
+	defer stopProg()
 
 	if size > 0 {
 		if err := f.Truncate(size); err != nil {
