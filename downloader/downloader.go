@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/net/publicsuffix"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
 )
@@ -107,7 +108,11 @@ type Options struct {
 //
 // transport is the underlying RoundTripper; nil means http.DefaultTransport.
 func NewClient(transport http.RoundTripper) (*http.Client, error) {
-	jar, err := cookiejar.New(nil)
+	// The public-suffix list keeps cookie domain scoping honest: without
+	// it the jar would accept a Set-Cookie scoped to "domain=.com" and
+	// replay it to every .com host — and redirect chains cross hosts by
+	// design here, so that's a live leak channel, not a theoretical one.
+	jar, err := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
 	if err != nil {
 		return nil, err
 	}
