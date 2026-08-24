@@ -91,9 +91,12 @@ func run(rawURL, output string, concurrency int, chunkSizeArg string, restart, f
 	var client *http.Client
 	if verbose {
 		// The library's default client with the dumping transport layered
-		// underneath, so -v changes only visibility, not behavior.
+		// underneath, so -v changes only visibility, not behavior. The
+		// dump wraps the downloader's own tuned transport, not
+		// http.DefaultTransport: wrapping the stock one would quietly
+		// hand -v runs an undersized connection pool.
 		var err error
-		if client, err = downloader.NewClient(dumpTransport{http.DefaultTransport}); err != nil {
+		if client, err = downloader.NewClient(dumpTransport{downloader.NewTransport(concurrency)}); err != nil {
 			return err
 		}
 	}
