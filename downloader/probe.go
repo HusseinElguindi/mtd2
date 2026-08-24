@@ -29,6 +29,12 @@ type ProbeResult struct {
 	FinalURL string
 }
 
+// probeDrainLimit bounds the probe's body drain. The expected body is one
+// byte; the allowance covers a server that answers with a slightly larger
+// range, while keeping a server that ignores the range entirely from
+// turning a probe into a download.
+const probeDrainLimit = 4 << 10
+
 // Probe issues a GET with "Range: bytes=0-0" to discover the resource's
 // size, range support, and validators. A GET with a one-byte range is more
 // reliable than HEAD across servers. A 206 response with a Content-Range
@@ -55,6 +61,21 @@ func Probe(ctx context.Context, client *http.Client, url string) (ProbeResult, e
 
 	switch resp.StatusCode {
 	case http.StatusPartialContent:
+		// Drain the one-byte body so this connection can be reused. Go's
+		// transport only returns a connection to the idle pool once its
+		// body has been read to EOF; closing with bytes outstanding kills
+		// the socket, so the first chunk request would otherwise open a
+		// second connection and pay a fresh TCP+TLS handshake — measured
+		// as three connections for three sequential probes, one when
+		// drained.
+		//
+		// The read is bounded, and lives in this branch only, for the same
+		// reason: a server can answer a range request with a 206 covering
+		// far more than the byte asked for, and the 200 branch's body is
+		// the entire file. Draining either in full would download the
+		// resource to recycle a socket.
+		io.Copy(io.Discard, io.LimitReader(resp.Body, probeDrainLimit))
+
 		size, err := parseContentRangeTotal(resp.Header.Get("Content-Range"))
 		if err != nil {
 			return ProbeResult{}, fmt.Errorf("probe %s: %w", url, err)
