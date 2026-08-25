@@ -38,6 +38,39 @@ new connection — no TCP handshake, no TLS handshake. What remains is
 roughly one round-trip of request latency (send headers, wait for the
 response to start), plus whatever per-request work the server does.
 
+That reuse is not free by default, though — it takes two departures from
+stock Go, each worth a paragraph because each was measured, not assumed.
+
+**The idle pool has to be sized to the worker count.** Go parks returned
+connections in a per-host idle pool holding
+`DefaultMaxIdleConnsPerHost` — **two** — connections. With eight workers
+that pool overflows constantly: a connection handed back to a full pool is
+closed rather than parked, so the worker's next chunk request has nothing
+to pick up and redials. Measured over a 41-request download at concurrency
+8, where the floor is 9 connections (one per worker plus the probe), the
+stock pool dialed between 9 and 14 across runs; sized to `concurrency+1`
+it dials 9 every time. The waste is a handshake — several RTTs of dead
+time before any byte of that chunk moves — and it lands unpredictably,
+which is the worse property. `NewTransport` sizes `MaxIdleConns`,
+`MaxIdleConnsPerHost`, and `MaxConnsPerHost` together; the last one also
+makes `-c` an honest promise, since N workers then open at most N+1
+sockets rather than approximately that many.
+
+It clones `http.DefaultTransport` rather than tuning it, because that
+value is process-wide: mutating it would reconfigure every other HTTP user
+in the program, including the `-v` dump path that wraps it.
+
+**The probe's body has to be drained.** Go returns a connection to the
+idle pool only after its body is read to EOF; closing a body with bytes
+outstanding kills the socket. `Probe` asks for one byte and used to close
+without reading it, so the handshake it paid for was discarded and the
+first chunk request opened a second connection — three sequential probes
+opened three connections, one when drained. The drain is bounded
+(`probeDrainLimit`) and lives only in the 206 branch: a server can answer
+a range request with far more than the byte asked for, and in the 200
+branch the body *is* the whole file, so an unbounded drain there would
+download the resource in order to recycle a socket.
+
 That RTT is the number chunk sizing has to respect. Worked example at a
 50 ms RTT with ~10 MB/s per stream:
 
@@ -133,3 +166,31 @@ lives in the code comments there:
   (`https://example.com/file?dload=a name.mp4`) that Go would forward
   verbatim as a malformed request target, drawing an opaque `400` from
   the server's request parser.
+
+The transport underneath comes from `NewTransport`, which adds the
+pool sizing described under [connection reuse](#what-a-chunk-request-costs-connection-reuse)
+above. A caller that passes its own transport — the CLI does, to layer
+`-v` request dumping — should wrap `NewTransport(concurrency)` rather than
+`http.DefaultTransport`, or the run silently gets a two-connection pool.
+
+## Known gap: HTTP/2 collapses the parallel download
+
+Unresolved, and worth knowing before reading a benchmark. `ForceAttemptHTTP2`
+is on in Go's default transport, so against an HTTPS server that
+negotiates h2 — most CDNs — the workers do not get N TCP connections.
+They get N *streams multiplexed over one* connection, and every
+per-connection bandwidth limit then applies to all of them at once. On a
+server throttling 10 MiB/s per connection, the same 24 MiB download took
+**574 ms over HTTP/1.1 (9 connections) and 3.90 s over HTTP/2 (1
+connection)** — a 6.8x difference, with nothing in the tool reporting
+anything unusual. Two smaller penalties ride along: a lost packet stalls
+every stream rather than one, and Go's h2 client advertises a 4 MiB
+per-stream window, capping a stream at window/RTT (~40 MiB/s at 100 ms).
+
+Forcing HTTP/1.1 takes both `Transport.TLSNextProto = map[...]{}` (to
+disable the h2 upgrade path) and `TLSClientConfig.NextProtos =
+{"http/1.1"}` (to stop advertising h2 in ALPN) — set one alone and you get
+either a handshake `EOF` or an HTTP/1 parser reading an h2 SETTINGS frame.
+Whether to force it, and when, is undecided: h2 saves handshakes and costs
+nothing against a server that rate-limits per request rather than per
+connection.

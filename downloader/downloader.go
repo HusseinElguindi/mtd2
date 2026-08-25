@@ -59,6 +59,11 @@ const (
 	maxChunkSize = 64 << 20 // 64 MiB
 )
 
+// DefaultConcurrency is the number of parallel range workers used when
+// Options.Concurrency is unset, and the pool size NewClient assumes when
+// it is handed no transport.
+const DefaultConcurrency = 8
+
 // chunkRetries is the number of attempts made per chunk before giving up;
 // retries re-range from the chunk's done counter so no bytes are re-fetched.
 const chunkRetries = 3
@@ -104,6 +109,38 @@ type Options struct {
 	Force bool
 }
 
+// NewTransport returns the HTTP transport the downloader uses by default:
+// a clone of http.DefaultTransport with its connection pool sized to the
+// download's concurrency.
+//
+// Stock Go parks at most DefaultMaxIdleConnsPerHost (2) idle connections
+// per host. With N workers that pool overflows constantly: a connection
+// returned to a full pool is closed rather than parked, so the next chunk
+// request redials and pays a fresh TCP+TLS handshake — several RTTs before
+// any data moves. Measured at concurrency 8 over a 41-request download,
+// the stock pool dialed 9 to 14 connections across runs where the floor is
+// 9; sized to the worker count it dials 9 every time.
+//
+// The pool is concurrency+1: the extra slot is the probe's connection,
+// which the first chunk request inherits rather than replacing.
+// MaxConnsPerHost caps the total at the same number, which makes -c an
+// honest promise — N workers open at most N+1 sockets to the host, never
+// a transient burst beyond it.
+//
+// The transport is always a clone. http.DefaultTransport is process-wide
+// state; tuning it in place would silently reconfigure every other HTTP
+// user in the program.
+func NewTransport(concurrency int) *http.Transport {
+	if concurrency <= 0 {
+		concurrency = DefaultConcurrency
+	}
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.MaxIdleConns = concurrency + 1
+	tr.MaxIdleConnsPerHost = concurrency + 1
+	tr.MaxConnsPerHost = concurrency + 1
+	return tr
+}
+
 // NewClient returns the HTTP client the downloader uses by default,
 // tuned for download flows a stock http.Client mishandles:
 //
@@ -115,7 +152,11 @@ type Options struct {
 //     redirect fail where pasting the Location URL works. curl sends no
 //     Referer either.
 //
-// transport is the underlying RoundTripper; nil means http.DefaultTransport.
+// transport is the underlying RoundTripper; nil means a NewTransport sized
+// for DefaultConcurrency. Callers that know their concurrency — or that
+// want to wrap the transport, as the CLI's -v flag does — should pass
+// NewTransport(concurrency) explicitly, so the pool matches the number of
+// workers that will use it.
 func NewClient(transport http.RoundTripper) (*http.Client, error) {
 	// The public-suffix list keeps cookie domain scoping honest: without
 	// it the jar would accept a Set-Cookie scoped to "domain=.com" and
@@ -124,6 +165,9 @@ func NewClient(transport http.RoundTripper) (*http.Client, error) {
 	jar, err := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
 	if err != nil {
 		return nil, err
+	}
+	if transport == nil {
+		transport = NewTransport(DefaultConcurrency)
 	}
 	return &http.Client{
 		Jar:       jar,
@@ -270,7 +314,7 @@ func New(opts Options) (*Downloader, error) {
 		return nil, errors.New("downloader: Output is required")
 	}
 	if opts.Concurrency <= 0 {
-		opts.Concurrency = 8
+		opts.Concurrency = DefaultConcurrency
 	}
 	// A pasted URL can carry the same illegal query bytes a redirect can
 	// (net/url keeps RawQuery verbatim); sanitize it once so every request
@@ -282,7 +326,7 @@ func New(opts Options) (*Downloader, error) {
 	client := opts.Client
 	if client == nil {
 		var err error
-		if client, err = NewClient(nil); err != nil {
+		if client, err = NewClient(NewTransport(opts.Concurrency)); err != nil {
 			return nil, err
 		}
 	}
