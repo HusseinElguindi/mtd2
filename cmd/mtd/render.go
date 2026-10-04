@@ -185,7 +185,7 @@ var leftEighths = []rune("▏▎▍▌▋▊▉")
 // colors swapped). Cells with more than one edge take the closest match.
 //
 // Without color the band is drawn in plain blocks: █ downloaded, ░ not
-// yet, eighth blocks for the edges, and no connection ticks.
+// yet, ▓ or ▒ for a cell that is partly in, and no connection ticks.
 func bandBar(p downloader.Progress, width int, color bool) string {
 	filled := coverage(p, width*8)
 	markers := make([]bool, width)
@@ -202,11 +202,11 @@ func bandBar(p downloader.Progress, width int, color bool) string {
 	for i := range width {
 		var bits [8]bool
 		copy(bits[:], filled[i*8:])
-		g, fg, bg := fitCell(bits)
 		if !color {
-			b.WriteRune(plainGlyph(g, fg, bg))
+			b.WriteRune(plainGlyph(bits))
 			continue
 		}
+		g, fg, bg := fitCell(bits)
 		if markers[i] {
 			// The tick replaces the cell's own edge; keep the color most of
 			// the cell has behind it.
@@ -233,21 +233,26 @@ func bandBar(p downloader.Progress, width int, color bool) string {
 	return b.String()
 }
 
-// plainGlyph redraws a fitCell result without colors. A filled-then-empty
-// edge keeps its eighth block over the blank cell; an empty-then-filled
-// one has no left-aligned glyph, so it rounds to a right eighth or half.
-func plainGlyph(g rune, fg, bg int) rune {
+// plainGlyph draws a cell without colors. An eighth block can't be used
+// for a partial cell here: its unfilled part would be blank, not ░, and
+// read as a gap between fill and track. Partial cells take a middle shade
+// instead.
+func plainGlyph(bits [8]bool) rune {
+	n := 0
+	for _, f := range bits {
+		if f {
+			n++
+		}
+	}
 	switch {
-	case fg == bg && fg == bandFill:
+	case n == 8:
 		return '█'
-	case fg == bg:
+	case n == 0:
 		return '░'
-	case fg == bandFill:
-		return g
-	case g >= '▌': // half or less of the cell is empty
-		return '▐'
+	case n >= 4:
+		return '▓'
 	default:
-		return '▕'
+		return '▒'
 	}
 }
 

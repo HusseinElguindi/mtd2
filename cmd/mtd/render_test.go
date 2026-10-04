@@ -17,8 +17,8 @@ func TestBar(t *testing.T) {
 		{0, 100, "░░░░"},
 		{100, 100, "████"},
 		{50, 100, "██░░"},
-		{1, 32, "▏░░░"},  // one eighth of one cell
-		{15, 32, "█▉░░"}, // 15/32 of 4 cells = 1 7/8 cells
+		{1, 32, "▒░░░"},  // one eighth of one cell
+		{15, 32, "█▓░░"}, // 15/32 of 4 cells = 1 7/8 cells
 		{200, 100, "████"},
 		{-5, 100, "░░░░"},
 	}
@@ -43,18 +43,18 @@ func TestBandBarPlain(t *testing.T) {
 		{Offset: 200, Length: 100, Done: 0, State: downloader.ChunkPending},
 		{Offset: 300, Length: 100, Done: 25, State: downloader.ChunkActive},
 	}}
-	if got, want := bandBar(p, 4, false), "█▌░▎"; got != want {
+	if got, want := bandBar(p, 4, false), "█▓░▒"; got != want {
 		t.Errorf("bandBar = %q, want %q", got, want)
 	}
 
-	// Fill that starts mid-cell rounds to a right-aligned block.
+	// Fill that starts mid-cell shades the same way.
 	p = downloader.Progress{Total: 160, Chunks: []downloader.ChunkProgress{
 		{Offset: 0, Length: 70, Done: 0, State: downloader.ChunkPending},
 		{Offset: 70, Length: 10, Done: 10, State: downloader.ChunkDone},
 		{Offset: 80, Length: 70, Done: 0, State: downloader.ChunkPending},
 		{Offset: 150, Length: 10, Done: 10, State: downloader.ChunkDone},
 	}}
-	if got, want := bandBar(p, 2, false), "▕▕"; got != want {
+	if got, want := bandBar(p, 2, false), "▒▒"; got != want {
 		t.Errorf("bandBar = %q, want %q", got, want)
 	}
 }
