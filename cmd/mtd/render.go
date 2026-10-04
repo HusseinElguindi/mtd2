@@ -71,9 +71,9 @@ func (r *renderer) render(p downloader.Progress) {
 			chunksDone++
 		}
 	}
-	line("total     %s", totalBar(p, totalBarWidth, r.color))
+	line("total    %s", totalBar(p, totalBarWidth, r.color))
 	if w, ok := activeWindow(p); ok {
-		line("active    %s", totalBar(w, totalBarWidth, r.color))
+		line("active   %s", totalBar(w, totalBarWidth, r.color))
 	}
 	line("          %s / %s  (%d/%d chunks)",
 		fmtBytes(p.Downloaded), fmtBytes(p.Total), chunksDone, len(p.Chunks))
@@ -278,70 +278,123 @@ func activeWindow(p downloader.Progress) (w downloader.Progress, ok bool) {
 	return w, true
 }
 
-// totalBar draws the whole-file map: a solid IDM-style band in color, or
-// the braille map when color is off (the band needs background colors).
+// totalBar draws a map of the whole file: a lead-in cell and then width
+// cells of band. The lead-in has room for the tick of a chunk that starts
+// at the band's left edge (see bandCells). Without color the map is
+// braille, since the band needs background colors.
 func totalBar(p downloader.Progress, width int, color bool) string {
 	if !color {
-		return segmentBar(p, width, false)
+		return " " + segmentBar(p, width, false)
 	}
-	return bandBar(p, width)
+	return drawBand(bandCells(p, width))
 }
 
 const (
 	bandFill   = 33  // blue: downloaded
 	bandTrack  = 237 // dark grey: not yet downloaded
-	bandMarker = 196 // red: where each chunk starts
+	bandMarker = 196 // red: where an active chunk starts
 )
 
 // leftEighths[k-1] fills the left k/8 of a cell with the foreground color;
 // the rest of the cell shows the background.
 var leftEighths = []rune("▏▎▍▌▋▊▉")
 
-// bandBar draws the file as a solid band, like IDM's "download progress by
-// connections" bar: downloaded ranges are filled in blue at their place in
-// the file, so each chunk's fill grows rightward from its start, and a red
-// tick marks where each active connection started.
+// minTickCells is the narrowest a chunk can be drawn, in cells, and still
+// get its own segment and tick. Below it chunk starts can't be placed
+// evenly, so the band falls back to a plain byte map without ticks.
+const minTickCells = 2
+
+// bandCell is one cell of a band: how many of its eighths are downloaded,
+// drawn from the left, and whether an active chunk starts at its right
+// edge.
+type bandCell struct {
+	fill int
+	tick bool
+}
+
+// bandCells lays the file out over width cells, like IDM's "download
+// progress by connections" bar, and returns width+1 cells: a lead-in
+// followed by the band.
 //
-// Each cell is split into eighths. A terminal cell has only two colors, so
-// a cell can show exactly one fill edge: filled-then-empty (fill colored
-// eighth block over the track background) or empty-then-filled (the
-// colors swapped). Cells with more than one edge take the closest match.
-func bandBar(p downloader.Progress, width int) string {
-	filled := coverage(p, width*8)
-	// markers[i] is the eighth (counted across the whole bar) where an
-	// active chunk starting in cell i begins, or -1 for no tick.
-	markers := make([]int, width)
-	for i := range markers {
-		markers[i] = -1
+// When chunks are at least minTickCells wide, each chunk gets its own
+// whole cells: its start and end snap to the nearest cell boundary, and
+// its fill is drawn from its first cell to the right, to the eighth, in
+// proportion to Done/Length. Snapping keeps every chunk's segment the
+// same width to within one cell and puts the fill right against the
+// chunk's start, so chunks at the same progress look the same. An active
+// chunk's tick goes on the right edge of the cell before its first cell
+// (the lead-in for a chunk at the left edge), so it never covers the
+// chunk's own fill.
+//
+// Narrower chunks can't be snapped without distorting the map, so then
+// each cell just shows how many of its eighths are downloaded, from the
+// left, with no ticks. Where in the cell those eighths are is dropped:
+// with several chunk edges per cell, placing them would make the band
+// flicker between left- and right-filled cells instead of reading as an
+// even comb.
+func bandCells(p downloader.Progress, width int) []bandCell {
+	cells := make([]bandCell, width+1)
+	if p.Total <= 0 {
+		return cells
 	}
-	if p.Total > 0 {
-		for _, c := range p.Chunks {
-			if c.State == downloader.ChunkActive {
-				e := int(c.Offset * int64(width*8) / p.Total)
-				if markers[e/8] < 0 {
-					markers[e/8] = e
-				}
+	band := cells[1:]
+	var maxLen int64
+	for _, c := range p.Chunks {
+		maxLen = max(maxLen, c.Length)
+	}
+	if maxLen*int64(width) < minTickCells*p.Total {
+		filled := coverage(p, width*8)
+		for i, f := range filled {
+			if f {
+				band[i/8].fill++
 			}
 		}
+		return cells
 	}
 
+	// boundary rounds a byte offset to the nearest cell boundary.
+	boundary := func(off int64) int {
+		return int((2*off*int64(width) + p.Total) / (2 * p.Total))
+	}
+	for _, c := range p.Chunks {
+		lo, hi := boundary(c.Offset), boundary(c.Offset+c.Length)
+		if c.Length > 0 {
+			eighths := int(min(max(c.Done, 0), c.Length) * int64(8*(hi-lo)) / c.Length)
+			for i := lo; i < hi; i++ {
+				band[i].fill = min(max(eighths-8*(i-lo), 0), 8)
+			}
+		}
+		if c.State == downloader.ChunkActive {
+			cells[lo].tick = true // band[lo-1], or the lead-in when lo is 0
+		}
+	}
+	return cells
+}
+
+// drawBand renders bandCells' output. Each cell is two colors: a left
+// eighth block in blue over the grey track, or a red tick over the color
+// most of the cell has.
+func drawBand(cells []bandCell) string {
 	var b strings.Builder
+	if cells[0].tick {
+		fmt.Fprintf(&b, "\x1b[38;5;%dm▕%s", bandMarker, barReset)
+	} else {
+		b.WriteByte(' ')
+	}
 	cur := ""
-	for i := range width {
-		var bits [8]bool
-		copy(bits[:], filled[i*8:])
-		g, fg, bg := fitCell(bits)
-		if e := markers[i]; e >= 0 {
-			// The tick replaces the cell's own edge. A chunk usually starts
-			// mid-cell, after a stretch of the previous chunk that isn't in
-			// yet, so judge the color behind the tick by the chunk's own
-			// start: once it has data, blue follows the tick at once. The
-			// eighth it starts in can be mostly the previous chunk's, so
-			// the one after counts too.
-			g, fg, bg = '▏', bandMarker, bandTrack
-			if filled[e] || e+1 < len(filled) && filled[e+1] {
+	for _, c := range cells[1:] {
+		g, fg, bg := ' ', bandTrack, bandTrack
+		switch {
+		case c.tick:
+			g, fg = '▕', bandMarker
+			if c.fill >= 4 {
 				bg = bandFill
 			}
+		case c.fill == 8:
+			fg, bg = bandFill, bandFill
+		case c.fill == 0:
+		default:
+			g, fg = leftEighths[c.fill-1], bandFill
 		}
 		if want := fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm", fg, bg); want != cur {
 			b.WriteString(want)
@@ -351,40 +404,6 @@ func bandBar(p downloader.Progress, width int) string {
 	}
 	b.WriteString(barReset)
 	return b.String()
-}
-
-// fitCell picks the glyph and colors that best draw one cell's eighths:
-// the first k eighths filled, or the last k, whichever differs from bits
-// in the fewest places.
-func fitCell(bits [8]bool) (glyph rune, fg, bg int) {
-	best, bestCost, suffix := 0, 9, false
-	for k := 0; k <= 8; k++ {
-		pre, suf := 0, 0
-		for i, f := range bits {
-			if f != (i < k) {
-				pre++
-			}
-			if f != (i >= 8-k) {
-				suf++
-			}
-		}
-		if pre < bestCost {
-			best, bestCost, suffix = k, pre, false
-		}
-		if suf < bestCost {
-			best, bestCost, suffix = k, suf, true
-		}
-	}
-	switch {
-	case best == 0:
-		return ' ', bandTrack, bandTrack
-	case best == 8:
-		return ' ', bandFill, bandFill
-	case suffix: // empty-then-filled: draw the empty part over a filled background
-		return leftEighths[8-best-1], bandTrack, bandFill
-	default:
-		return leftEighths[best-1], bandFill, bandTrack
-	}
 }
 
 // coverage splits the file into n equal units and reports which are
