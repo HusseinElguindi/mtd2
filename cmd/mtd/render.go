@@ -102,11 +102,10 @@ func (r *renderer) statsLine(p downloader.Progress) string {
 		fmtBytes(int64(p.DiskRate)), fmtBytes(int64(p.AvgRate)), eta)
 }
 
-// Bars are drawn in braille. Each cell holds 8 dots, so a cell has 9 fill
-// levels: brailleLevels[n] is a cell with n dots lit, filling the left
-// column bottom-up and then the right, which reads as left-to-right.
-var brailleLevels = []rune("⣀⡀⡄⡆⡇⣇⣧⣷⣿")
-
+// Bars are drawn in braille. A cell is two columns of 4 dots, and each
+// column fills bottom-up on its own: the left column stands for the first
+// half of the cell, the right for the second. A plain bar fills the left
+// column and then the right, advancing a dot (1/8 cell) at a time.
 const (
 	barFill  = "\x1b[36m"       // cyan: downloaded
 	barHead  = "\x1b[93m"       // yellow: a cell an active chunk is writing into
@@ -114,11 +113,31 @@ const (
 	barReset = "\x1b[0m"
 )
 
-// cell is one character of a bar: how many of its 8 dots are lit, and
-// whether an active chunk's write position falls inside it.
+// Braille dot bits for each column, bottom to top.
+var (
+	leftDots  = [4]rune{0x40, 0x04, 0x02, 0x01}
+	rightDots = [4]rune{0x80, 0x20, 0x10, 0x08}
+)
+
+// cell is one character of a bar: how many dots (0-4) are lit in each
+// column, and whether an active chunk's write position falls inside it.
 type cell struct {
-	level int
-	head  bool
+	left, right int
+	head        bool
+}
+
+func (c cell) glyph() rune {
+	if c.left == 0 && c.right == 0 {
+		return '⣀' // empty track
+	}
+	r := rune(0x2800)
+	for i := range c.left {
+		r |= leftDots[i]
+	}
+	for i := range c.right {
+		r |= rightDots[i]
+	}
+	return r
 }
 
 // bar draws done/total as a bar width cells wide that advances a dot
@@ -129,56 +148,60 @@ func bar(done, total int64, width int, color bool) string {
 		dots := int(float64(done) / float64(total) * float64(width*8))
 		dots = min(max(dots, 0), width*8)
 		for i := range cells {
-			cells[i].level = min(max(dots-i*8, 0), 8)
+			n := min(max(dots-i*8, 0), 8)
+			cells[i].left, cells[i].right = min(n, 4), max(n-4, 0)
 		}
 	}
 	return drawCells(cells, color)
 }
 
-// segmentBar draws the whole file as a map, IDM-style: each cell covers
-// total/width bytes, and lights up only as far as the chunks overlapping
-// it have actually downloaded, so every chunk's segment fills in at its
-// own place in the file. Cells holding an active chunk's write position
-// are highlighted.
+// segmentBar draws the whole file as a map, IDM-style: every chunk's
+// segment fills in at its own place in the file. Each cell column covers
+// total/(2*width) bytes and lights up as far as the chunks overlapping it
+// have downloaded, so dots sit where the data actually is, even when a
+// chunk boundary falls mid-cell. Cells an active chunk is about to write
+// into are highlighted.
 func segmentBar(p downloader.Progress, width int, color bool) string {
 	cells := make([]cell, width)
 	if p.Total <= 0 {
 		return drawCells(cells, color)
 	}
-	// Cell i covers bytes [edge(i), edge(i+1)). Integer math keeps a
-	// fully downloaded cell at exactly 8 dots; float spans summed across a
-	// chunk boundary can land a hair under and floor to 7, leaving a
-	// notch in the top edge.
-	edge := func(i int) int64 { return p.Total * int64(i) / int64(width) }
-	// cellOf inverts edge: the last cell whose first byte is at or before b.
-	cellOf := func(b int64) int { return int(((b+1)*int64(width) - 1) / p.Total) }
-	got := make([]int64, width) // downloaded bytes falling in each cell
+	// Column j covers bytes [edge(j), edge(j+1)). Integer math keeps a
+	// fully downloaded column at exactly 4 dots; float spans summed across
+	// a chunk boundary can land a hair under and floor, leaving a notch in
+	// the top edge.
+	cols := int64(2 * width)
+	edge := func(j int) int64 { return p.Total * int64(j) / cols }
+	// colOf inverts edge: the last column whose first byte is at or before b.
+	colOf := func(b int64) int { return int(((b+1)*cols - 1) / p.Total) }
+	got := make([]int64, cols) // downloaded bytes falling in each column
 	for _, c := range p.Chunks {
 		start, end := c.Offset, c.Offset+c.Done
+		if c.State == downloader.ChunkActive && c.Done < c.Length {
+			cells[colOf(end)/2].head = true // where the next byte lands
+		}
 		if end <= start {
 			continue
 		}
-		first, last := cellOf(start), min(cellOf(end-1), width-1)
-		for i := first; i <= last; i++ {
-			got[i] += min(end, edge(i+1)) - max(start, edge(i))
-		}
-		if c.State == downloader.ChunkActive && c.Done < c.Length {
-			cells[last].head = true
+		for j := colOf(start); j <= colOf(end-1); j++ {
+			got[j] += min(end, edge(j+1)) - max(start, edge(j))
 		}
 	}
-	for i, g := range got {
-		span := edge(i+1) - edge(i)
-		if span == 0 { // file smaller than the bar: show the byte at edge(i)
-			if downloaded(p.Chunks, edge(i)) {
-				cells[i].level = 8
+	for j, g := range got {
+		lvl := 0
+		if span := edge(j+1) - edge(j); span > 0 {
+			lvl = int(g * 4 / span)
+			if g > 0 && lvl == 0 {
+				lvl = 1 // show that something landed here
 			}
-			continue
+		} else if downloaded(p.Chunks, edge(j)) {
+			lvl = 4 // file smaller than the bar: show the byte at edge(j)
 		}
-		lvl := int(g * 8 / span)
-		if g > 0 && lvl == 0 {
-			lvl = 1 // show that something landed here
+		if j%2 == 0 {
+			cells[j/2].left = lvl
+		} else {
+			cells[j/2].right = lvl
 		}
-		cells[i].level = min(lvl, 8)
 	}
 	return drawCells(cells, color)
 }
@@ -201,7 +224,7 @@ func drawCells(cells []cell, color bool) string {
 			switch {
 			case c.head:
 				want = barHead
-			case c.level > 0:
+			case c.left > 0 || c.right > 0:
 				want = barFill
 			}
 			if want != cur {
@@ -209,7 +232,7 @@ func drawCells(cells []cell, color bool) string {
 				cur = want
 			}
 		}
-		b.WriteRune(brailleLevels[c.level])
+		b.WriteRune(c.glyph())
 	}
 	if color {
 		b.WriteString(barReset)

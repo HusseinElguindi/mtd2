@@ -58,6 +58,31 @@ func TestSegmentBar(t *testing.T) {
 	}
 }
 
+// Downloaded bytes in the second half of a cell light its right column,
+// not its left.
+func TestSegmentBarRightHalf(t *testing.T) {
+	p := downloader.Progress{Total: 80, Chunks: []downloader.ChunkProgress{
+		{Offset: 0, Length: 60, Done: 0, State: downloader.ChunkPending},
+		{Offset: 60, Length: 20, Done: 10, State: downloader.ChunkActive},
+	}}
+	if got, want := segmentBar(p, 2, false), "⣀⢠"; got != want {
+		t.Errorf("segmentBar = %q, want %q", got, want)
+	}
+}
+
+// An active chunk that hasn't received a byte yet still marks where its
+// connection will write.
+func TestSegmentBarHeadBeforeFirstByte(t *testing.T) {
+	p := downloader.Progress{Total: 80, Chunks: []downloader.ChunkProgress{
+		{Offset: 0, Length: 40, Done: 40, State: downloader.ChunkDone},
+		{Offset: 40, Length: 40, Done: 0, State: downloader.ChunkActive},
+	}}
+	want := barFill + "⣿" + barHead + "⣀" + barReset
+	if got := segmentBar(p, 2, true); got != want {
+		t.Errorf("segmentBar = %q, want %q", got, want)
+	}
+}
+
 // A finished download must draw as a solid bar whatever the chunk and cell
 // boundaries, with no cell short a dot from rounding.
 func TestSegmentBarCompleteIsSolid(t *testing.T) {
