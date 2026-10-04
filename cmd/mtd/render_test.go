@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -103,49 +104,120 @@ func TestSegmentBarCompleteIsSolid(t *testing.T) {
 	}
 }
 
-func TestFitCell(t *testing.T) {
-	b := func(s string) (bits [8]bool) {
-		for i, ch := range s {
-			bits[i] = ch == '#'
-		}
-		return
+func chunks(n int, size int64, state func(i int) (int64, downloader.ChunkState)) downloader.Progress {
+	p := downloader.Progress{Total: int64(n) * size}
+	for i := range n {
+		done, st := state(i)
+		p.Chunks = append(p.Chunks, downloader.ChunkProgress{
+			Index: i, Offset: int64(i) * size, Length: size, Done: done, State: st,
+		})
 	}
-	cases := []struct {
-		bits   string
-		glyph  rune
-		fg, bg int
-	}{
-		{"........", ' ', bandTrack, bandTrack},
-		{"########", ' ', bandFill, bandFill},
-		{"###.....", '▍', bandFill, bandTrack}, // fill ends 3/8 in
-		{".....###", '▋', bandTrack, bandFill}, // fill starts 5/8 in
-		{"##...###", '▋', bandTrack, bandFill}, // two edges: nearest single edge
-		{"#.......", '▏', bandFill, bandTrack},
+	return p
+}
+
+// Equal chunks at equal progress draw as identical, evenly spaced
+// segments: a tick, then the chunk's fill starting in its first cell.
+func TestBandCellsEven(t *testing.T) {
+	p := chunks(10, 1000, func(int) (int64, downloader.ChunkState) { return 300, downloader.ChunkActive })
+	cells := bandCells(p, 40)
+	if !cells[0].tick {
+		t.Error("lead-in has no tick for the chunk at the left edge")
 	}
-	for _, c := range cases {
-		g, fg, bg := fitCell(b(c.bits))
-		if g != c.glyph || fg != c.fg || bg != c.bg {
-			t.Errorf("fitCell(%s) = %q %d/%d, want %q %d/%d", c.bits, g, fg, bg, c.glyph, c.fg, c.bg)
+	// 4 cells per chunk is 32 eighths, and 30% of that is 9: one full
+	// cell and one eighth. The next chunk's tick is on the last cell.
+	for i := range 10 {
+		want := []bandCell{{fill: 8}, {fill: 1}, {}, {tick: i < 9}}
+		if got := cells[1+4*i : 5+4*i]; !slices.Equal(got, want) {
+			t.Errorf("chunk %d: %+v, want %+v", i, got, want)
 		}
 	}
 }
 
-// Each chunk's fill sits at its own place in the file and every chunk
-// start gets a tick.
-func TestBandBar(t *testing.T) {
-	p := downloader.Progress{Total: 400, Chunks: []downloader.ChunkProgress{
-		{Offset: 0, Length: 200, Done: 150, State: downloader.ChunkActive},
-		{Offset: 200, Length: 200, Done: 25, State: downloader.ChunkActive},
-	}}
-	// 4 cells of 100 bytes: cell 0 full (tick over fill), cell 1 half,
-	// cell 2 a quarter (tick over track), cell 3 empty.
-	tick := func(bg int) string { return fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm▏", bandMarker, bg) }
-	want := tick(bandFill) +
-		fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm▌", bandFill, bandTrack) +
-		tick(bandTrack) +
-		fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm ", bandTrack, bandTrack) + barReset
-	if got := bandBar(p, 4); got != want {
-		t.Errorf("bandBar =\n%q\nwant\n%q", got, want)
+// When chunks don't divide the band evenly, each one still starts on the
+// nearest cell boundary, so segments differ by at most a cell and every
+// fill starts right after its tick.
+func TestBandCellsUneven(t *testing.T) {
+	p := chunks(10, 1000, func(int) (int64, downloader.ChunkState) { return 300, downloader.ChunkActive })
+	cells := bandCells(p, 48)
+	var ticks []int
+	for i, c := range cells {
+		if c.tick {
+			ticks = append(ticks, i) // a chunk starts at band cell i
+		}
+	}
+	if want := []int{0, 5, 10, 14, 19, 24, 29, 34, 38, 43}; !slices.Equal(ticks, want) {
+		t.Fatalf("chunk starts = %v, want %v", ticks, want)
+	}
+	for _, lo := range ticks {
+		if c := cells[1+lo]; c.fill != 8 {
+			t.Errorf("chunk at cell %d: first cell %+v, want full", lo, c)
+		}
+	}
+}
+
+// Chunks narrower than minTickCells get no ticks; each cell shows exactly
+// as many eighths as are downloaded, and equal chunks at equal progress
+// make a comb that repeats evenly.
+func TestBandCellsDense(t *testing.T) {
+	p := chunks(40, 1000, func(i int) (int64, downloader.ChunkState) {
+		switch {
+		case i < 10:
+			return 1000, downloader.ChunkDone
+		case i < 20:
+			return 350, downloader.ChunkActive
+		}
+		return 0, downloader.ChunkPending
+	})
+	cells := bandCells(p, 48)
+	got := 0
+	for _, c := range cells {
+		if c.tick {
+			t.Fatal("dense band has ticks")
+		}
+		got += c.fill
+	}
+	want := 0
+	for _, f := range coverage(p, 48*8) {
+		if f {
+			want++
+		}
+	}
+	if got != want {
+		t.Errorf("band shows %d eighths, want %d", got, want)
+	}
+	// 40 chunks over 48 cells is 5 chunks per 6 cells, so the active
+	// stretch (chunks 10-19, cells 12-23) is one 6-cell pattern twice.
+	if a, b := cells[1+12:1+18], cells[1+18:1+24]; !slices.Equal(a, b) {
+		t.Errorf("active stretch doesn't repeat: %+v then %+v", a, b)
+	}
+}
+
+// A finished download is a solid band at any chunk count and width.
+func TestBandCellsCompleteIsSolid(t *testing.T) {
+	for _, n := range []int{1, 3, 8, 10, 40, 333} {
+		p := chunks(n, 7777, func(int) (int64, downloader.ChunkState) { return 7777, downloader.ChunkDone })
+		for _, w := range []int{20, 33, 48} {
+			for i, c := range bandCells(p, w)[1:] {
+				if c != (bandCell{fill: 8}) {
+					t.Errorf("%d chunks, width %d: cell %d = %+v", n, w, i, c)
+					break
+				}
+			}
+		}
+	}
+}
+
+func TestDrawBand(t *testing.T) {
+	cells := []bandCell{{tick: true}, {fill: 8}, {fill: 3}, {fill: 5, tick: true}, {fill: 3, tick: true}, {}}
+	esc := func(fg, bg int) string { return fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm", fg, bg) }
+	want := fmt.Sprintf("\x1b[38;5;%dm▕", bandMarker) + barReset +
+		esc(bandFill, bandFill) + " " +
+		esc(bandFill, bandTrack) + "▍" +
+		esc(bandMarker, bandFill) + "▕" + // a tick over a mostly filled cell
+		esc(bandMarker, bandTrack) + "▕" + // and over a mostly empty one
+		esc(bandTrack, bandTrack) + " " + barReset
+	if got := drawBand(cells); got != want {
+		t.Errorf("drawBand =\n%q\nwant\n%q", got, want)
 	}
 }
 
