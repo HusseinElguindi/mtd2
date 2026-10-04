@@ -24,6 +24,15 @@ const (
 
 var eighths = []rune("▏▎▍▌▋▊▉")
 
+func styleOld(p float64) string { // the original ASCII bar
+	f := int(p*width + 0.5)
+	b := strings.Repeat("=", f)
+	if f > 0 && f < width {
+		b = b[:f-1] + ">"
+	}
+	return "[" + b + strings.Repeat(" ", width-f) + "]"
+}
+
 func styleA(p float64) string { // eighth blocks on a grey background track
 	e := int(p * width * 8)
 	full, part := e/8, e%8
@@ -97,11 +106,12 @@ func main() {
 		name string
 		draw func(float64) string
 	}{
-		{"A  Eighth blocks on grey track (current PR)", styleA},
+		{"Old  ASCII (before this PR)", styleOld},
+		{"A  Eighth blocks on grey track", styleA},
 		{"B  Shaded blocks", styleB},
 		{"C  Thin line", styleC},
 		{"D  Background fill behind the label", func(p float64) string { return styleD(p, 512) }},
-		{"E  Braille dots", styleE},
+		{"E  Braille dots (picked)", styleE},
 		{"F  Squares", styleF},
 	}
 	offsets := []float64{0, 0.33, 0.66}

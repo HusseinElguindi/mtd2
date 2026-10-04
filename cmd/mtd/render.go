@@ -71,7 +71,7 @@ func (r *renderer) render(p downloader.Progress) {
 			chunksDone++
 		}
 	}
-	line("total     %s %9s / %s  (%d/%d chunks)", bar(p.Downloaded, p.Total, 20, r.color),
+	line("total     %s %9s / %s  (%d/%d chunks)", segmentBar(p, 20, r.color),
 		fmtBytes(p.Downloaded), fmtBytes(p.Total), chunksDone, len(p.Chunks))
 	line("%s", r.statsLine(p))
 	// The frame shrinks as chunks finish; clear whatever the previous,
@@ -102,42 +102,97 @@ func (r *renderer) statsLine(p downloader.Progress) string {
 		fmtBytes(int64(p.DiskRate)), fmtBytes(int64(p.AvgRate)), eta)
 }
 
-// barEighths are the left-aligned partial blocks, ▏ (1/8) through ▉ (7/8),
-// which let a bar advance by an eighth of a cell instead of a whole one.
-var barEighths = []rune("▏▎▍▌▋▊▉")
+// Bars are drawn in braille. Each cell holds 8 dots, so a cell has 9 fill
+// levels: brailleLevels[n] is a cell with n dots lit, filling the left
+// column bottom-up and then the right, which reads as left-to-right.
+var brailleLevels = []rune("⣀⡀⡄⡆⡇⣇⣧⣷⣿")
 
 const (
-	barFill  = "\x1b[36m"       // cyan fill
-	barTrack = "\x1b[48;5;236m" // dark grey background for the unfilled track
+	barFill  = "\x1b[36m"       // cyan: downloaded
+	barHead  = "\x1b[93m"       // yellow: a cell an active chunk is writing into
+	barTrack = "\x1b[38;5;238m" // dark grey: not yet downloaded
 	barReset = "\x1b[0m"
 )
 
-// bar draws a smooth bar width cells wide: full blocks for the filled part,
-// one partial eighth-block at the leading edge, and a shaded background
-// track behind the rest. With color off, the track is drawn with ░ instead.
-func bar(done, total int64, width int, color bool) string {
-	eighths := 0
-	if total > 0 {
-		eighths = int(float64(done) / float64(total) * float64(width*8))
-		eighths = min(max(eighths, 0), width*8)
-	}
-	full, part := eighths/8, eighths%8
+// cell is one character of a bar: how many of its 8 dots are lit, and
+// whether an active chunk's write position falls inside it.
+type cell struct {
+	level int
+	head  bool
+}
 
+// bar draws done/total as a bar width cells wide that advances a dot
+// (1/8 cell) at a time.
+func bar(done, total int64, width int, color bool) string {
+	cells := make([]cell, width)
+	if total > 0 {
+		dots := int(float64(done) / float64(total) * float64(width*8))
+		dots = min(max(dots, 0), width*8)
+		for i := range cells {
+			cells[i].level = min(max(dots-i*8, 0), 8)
+		}
+	}
+	return drawCells(cells, color)
+}
+
+// segmentBar draws the whole file as a map, IDM-style: each cell covers
+// total/width bytes, and lights up only as far as the chunks overlapping
+// it have actually downloaded, so every chunk's segment fills in at its
+// own place in the file. Cells holding an active chunk's write position
+// are highlighted.
+func segmentBar(p downloader.Progress, width int, color bool) string {
+	cells := make([]cell, width)
+	if p.Total <= 0 {
+		return drawCells(cells, color)
+	}
+	span := float64(p.Total) / float64(width)
+	got := make([]float64, width) // downloaded bytes falling in each cell
+	for _, c := range p.Chunks {
+		start, end := float64(c.Offset), float64(c.Offset+c.Done)
+		if end <= start {
+			continue
+		}
+		first := int(start / span)
+		last := min(int((end-1)/span), width-1)
+		for i := first; i <= last; i++ {
+			lo, hi := max(start, float64(i)*span), min(end, float64(i+1)*span)
+			got[i] += hi - lo
+		}
+		if c.State == downloader.ChunkActive && c.Done < c.Length {
+			cells[last].head = true
+		}
+	}
+	for i, g := range got {
+		lvl := int(g / span * 8)
+		if g > 0 && lvl == 0 {
+			lvl = 1 // show that something landed here
+		}
+		cells[i].level = min(lvl, 8)
+	}
+	return drawCells(cells, color)
+}
+
+func drawCells(cells []cell, color bool) string {
 	var b strings.Builder
-	if color {
-		b.WriteString(barTrack + barFill)
+	cur := ""
+	for _, c := range cells {
+		if color {
+			want := barTrack
+			switch {
+			case c.head:
+				want = barHead
+			case c.level > 0:
+				want = barFill
+			}
+			if want != cur {
+				b.WriteString(want)
+				cur = want
+			}
+		}
+		b.WriteRune(brailleLevels[c.level])
 	}
-	b.WriteString(strings.Repeat("█", full))
-	rest := width - full
-	if part > 0 {
-		b.WriteRune(barEighths[part-1])
-		rest--
-	}
 	if color {
-		b.WriteString(strings.Repeat(" ", rest))
 		b.WriteString(barReset)
-	} else {
-		b.WriteString(strings.Repeat("░", rest))
 	}
 	return b.String()
 }
