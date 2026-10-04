@@ -244,3 +244,34 @@ func TestActiveWindow(t *testing.T) {
 		t.Error("activeWindow with nothing active: ok = true")
 	}
 }
+
+func TestAssignRows(t *testing.T) {
+	chunks := func(active ...int) []downloader.ChunkProgress {
+		cs := make([]downloader.ChunkProgress, 8)
+		for i := range cs {
+			cs[i] = downloader.ChunkProgress{Index: i, State: downloader.ChunkPending}
+		}
+		for _, i := range active {
+			cs[i].State = downloader.ChunkActive
+		}
+		return cs
+	}
+	cases := []struct {
+		name   string
+		prev   []int
+		active []int
+		want   []int
+	}{
+		{"first frame", nil, []int{0, 1, 2}, []int{0, 1, 2}},
+		{"steady", []int{0, 1, 2}, []int{0, 1, 2}, []int{0, 1, 2}},
+		{"finished chunk's row goes to the new one", []int{0, 1, 2}, []int{0, 2, 3}, []int{0, 3, 2}},
+		{"rows close up when nothing replaces them", []int{0, 1, 2}, []int{0, 2}, []int{0, 2}},
+		{"extra new chunks go at the end", []int{3, 1}, []int{1, 4, 5}, []int{4, 1, 5}},
+		{"done", []int{4, 1}, nil, []int{}},
+	}
+	for _, c := range cases {
+		if got := assignRows(c.prev, chunks(c.active...)); !slices.Equal(got, c.want) {
+			t.Errorf("%s: assignRows(%v) = %v, want %v", c.name, c.prev, got, c.want)
+		}
+	}
+}
