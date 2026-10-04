@@ -71,9 +71,9 @@ func (r *renderer) render(p downloader.Progress) {
 			chunksDone++
 		}
 	}
-	line("total     %s", totalBar(p, totalBarWidth, r.color))
+	line("total     %s", bandBar(p, totalBarWidth, r.color))
 	if w, ok := activeWindow(p); ok {
-		line("active    %s", totalBar(w, totalBarWidth, r.color))
+		line("active    %s", bandBar(w, totalBarWidth, r.color))
 	}
 	line("          %s / %s  (%d/%d chunks)",
 		fmtBytes(p.Downloaded), fmtBytes(p.Total), chunksDone, len(p.Chunks))
@@ -106,108 +106,19 @@ func (r *renderer) statsLine(p downloader.Progress) string {
 		fmtBytes(int64(p.DiskRate)), fmtBytes(int64(p.AvgRate)), eta)
 }
 
-// Bars are drawn in braille. A cell is two columns of 4 dots, and each
-// column fills bottom-up on its own: the left column stands for the first
-// half of the cell, the right for the second. A plain bar fills the left
-// column and then the right, advancing a dot (1/8 cell) at a time.
-const (
-	barFill  = "\x1b[36m"       // cyan: downloaded
-	barHead  = "\x1b[93m"       // yellow: a cell an active chunk is writing into
-	barTrack = "\x1b[38;5;238m" // dark grey: not yet downloaded
-	barReset = "\x1b[0m"
-)
+// Bars are drawn as solid blocks: downloaded cells are filled and each
+// cell is split into eighths, so a bar advances 1/8 cell at a time.
+const barReset = "\x1b[0m"
 
-// Braille dot bits for each column, bottom to top.
-var (
-	leftDots  = [4]rune{0x40, 0x04, 0x02, 0x01}
-	rightDots = [4]rune{0x80, 0x20, 0x10, 0x08}
-)
-
-// cell is one character of a bar: how many dots (0-4) are lit in each
-// column, and whether an active chunk's write position falls inside it.
-type cell struct {
-	left, right int
-	head        bool
-}
-
-func (c cell) glyph() rune {
-	if c.left == 0 && c.right == 0 {
-		return '⣀' // empty track
-	}
-	r := rune(0x2800)
-	for i := range c.left {
-		r |= leftDots[i]
-	}
-	for i := range c.right {
-		r |= rightDots[i]
-	}
-	return r
-}
-
-// bar draws done/total as a bar width cells wide that advances a dot
-// (1/8 cell) at a time.
+// bar draws done/total as a solid bar width cells wide, filling left to
+// right. It is the whole-file band for a file made of one chunk.
 func bar(done, total int64, width int, color bool) string {
-	cells := make([]cell, width)
+	p := downloader.Progress{Total: total}
 	if total > 0 {
-		dots := int(float64(done) / float64(total) * float64(width*8))
-		dots = min(max(dots, 0), width*8)
-		for i := range cells {
-			n := min(max(dots-i*8, 0), 8)
-			cells[i].left, cells[i].right = min(n, 4), max(n-4, 0)
-		}
+		done = min(max(done, 0), total)
+		p.Chunks = []downloader.ChunkProgress{{Length: total, Done: done, State: downloader.ChunkDone}}
 	}
-	return drawCells(cells, color)
-}
-
-// segmentBar draws the whole file as a map, IDM-style: every chunk's
-// segment fills in at its own place in the file. Each cell column covers
-// total/(2*width) bytes and lights up as far as the chunks overlapping it
-// have downloaded, so dots sit where the data actually is, even when a
-// chunk boundary falls mid-cell. Cells an active chunk is about to write
-// into are highlighted.
-func segmentBar(p downloader.Progress, width int, color bool) string {
-	cells := make([]cell, width)
-	if p.Total <= 0 {
-		return drawCells(cells, color)
-	}
-	// Column j covers bytes [edge(j), edge(j+1)). Integer math keeps a
-	// fully downloaded column at exactly 4 dots; float spans summed across
-	// a chunk boundary can land a hair under and floor, leaving a notch in
-	// the top edge.
-	cols := int64(2 * width)
-	edge := func(j int) int64 { return p.Total * int64(j) / cols }
-	// colOf inverts edge: the last column whose first byte is at or before b.
-	colOf := func(b int64) int { return int(((b+1)*cols - 1) / p.Total) }
-	got := make([]int64, cols) // downloaded bytes falling in each column
-	for _, c := range p.Chunks {
-		start, end := c.Offset, c.Offset+c.Done
-		if c.State == downloader.ChunkActive && c.Done < c.Length {
-			cells[colOf(end)/2].head = true // where the next byte lands
-		}
-		if end <= start {
-			continue
-		}
-		for j := colOf(start); j <= colOf(end-1); j++ {
-			got[j] += min(end, edge(j+1)) - max(start, edge(j))
-		}
-	}
-	for j, g := range got {
-		lvl := 0
-		if span := edge(j+1) - edge(j); span > 0 {
-			lvl = int(g * 4 / span)
-			if g > 0 && lvl == 0 {
-				lvl = 1 // show that something landed here
-			}
-		} else if downloaded(p.Chunks, edge(j)) {
-			lvl = 4 // file smaller than the bar: show the byte at edge(j)
-		}
-		if j%2 == 0 {
-			cells[j/2].left = lvl
-		} else {
-			cells[j/2].right = lvl
-		}
-	}
-	return drawCells(cells, color)
+	return bandBar(p, width, color)
 }
 
 func downloaded(chunks []downloader.ChunkProgress, off int64) bool {
@@ -217,31 +128,6 @@ func downloaded(chunks []downloader.ChunkProgress, off int64) bool {
 		}
 	}
 	return false
-}
-
-func drawCells(cells []cell, color bool) string {
-	var b strings.Builder
-	cur := ""
-	for _, c := range cells {
-		if color {
-			want := barTrack
-			switch {
-			case c.head:
-				want = barHead
-			case c.left > 0 || c.right > 0:
-				want = barFill
-			}
-			if want != cur {
-				b.WriteString(want)
-				cur = want
-			}
-		}
-		b.WriteRune(c.glyph())
-	}
-	if color {
-		b.WriteString(barReset)
-	}
-	return b.String()
 }
 
 // totalBarWidth is wider than the per-chunk bars: the total bar maps the
@@ -278,15 +164,6 @@ func activeWindow(p downloader.Progress) (w downloader.Progress, ok bool) {
 	return w, true
 }
 
-// totalBar draws the whole-file map: a solid IDM-style band in color, or
-// the braille map when color is off (the band needs background colors).
-func totalBar(p downloader.Progress, width int, color bool) string {
-	if !color {
-		return segmentBar(p, width, false)
-	}
-	return bandBar(p, width)
-}
-
 const (
 	bandFill   = 33  // blue: downloaded
 	bandTrack  = 237 // dark grey: not yet downloaded
@@ -306,7 +183,10 @@ var leftEighths = []rune("▏▎▍▌▋▊▉")
 // a cell can show exactly one fill edge: filled-then-empty (fill colored
 // eighth block over the track background) or empty-then-filled (the
 // colors swapped). Cells with more than one edge take the closest match.
-func bandBar(p downloader.Progress, width int) string {
+//
+// Without color the band is drawn in plain blocks: █ downloaded, ░ not
+// yet, eighth blocks for the edges, and no connection ticks.
+func bandBar(p downloader.Progress, width int, color bool) string {
 	filled := coverage(p, width*8)
 	markers := make([]bool, width)
 	if p.Total > 0 {
@@ -323,6 +203,10 @@ func bandBar(p downloader.Progress, width int) string {
 		var bits [8]bool
 		copy(bits[:], filled[i*8:])
 		g, fg, bg := fitCell(bits)
+		if !color {
+			b.WriteRune(plainGlyph(g, fg, bg))
+			continue
+		}
 		if markers[i] {
 			// The tick replaces the cell's own edge; keep the color most of
 			// the cell has behind it.
@@ -343,8 +227,28 @@ func bandBar(p downloader.Progress, width int) string {
 		}
 		b.WriteRune(g)
 	}
-	b.WriteString(barReset)
+	if color {
+		b.WriteString(barReset)
+	}
 	return b.String()
+}
+
+// plainGlyph redraws a fitCell result without colors. A filled-then-empty
+// edge keeps its eighth block over the blank cell; an empty-then-filled
+// one has no left-aligned glyph, so it rounds to a right eighth or half.
+func plainGlyph(g rune, fg, bg int) rune {
+	switch {
+	case fg == bg && fg == bandFill:
+		return '█'
+	case fg == bg:
+		return '░'
+	case fg == bandFill:
+		return g
+	case g >= '▌': // half or less of the cell is empty
+		return '▐'
+	default:
+		return '▕'
+	}
 }
 
 // fitCell picks the glyph and colors that best draw one cell's eighths:
