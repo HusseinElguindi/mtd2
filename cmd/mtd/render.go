@@ -165,129 +165,70 @@ func activeWindow(p downloader.Progress) (w downloader.Progress, ok bool) {
 }
 
 const (
-	bandFill   = 33  // blue: downloaded
-	bandTrack  = 237 // dark grey: not yet downloaded
-	bandMarker = 196 // red: where each chunk starts
+	bandFill  = 33  // blue: downloaded
+	bandTrack = 237 // dark grey: not yet downloaded
 )
 
-// leftEighths[k-1] fills the left k/8 of a cell with the foreground color;
-// the rest of the cell shows the background.
-var leftEighths = []rune("▏▎▍▌▋▊▉")
+// shadeLevel buckets how many of a cell's eighths are downloaded into
+// 0 (empty), 1-3 (light, medium, dark shade) or 4 (full).
+func shadeLevel(n int) int {
+	switch {
+	case n == 0:
+		return 0
+	case n <= 2:
+		return 1
+	case n <= 5:
+		return 2
+	case n <= 7:
+		return 3
+	default:
+		return 4
+	}
+}
 
-// bandBar draws the file as a solid band, like IDM's "download progress by
-// connections" bar: downloaded ranges are filled in blue at their place in
-// the file, so each chunk's fill grows rightward from its start, and a red
-// tick marks where each active connection started.
-//
-// Each cell is split into eighths. A terminal cell has only two colors, so
-// a cell can show exactly one fill edge: filled-then-empty (fill colored
-// eighth block over the track background) or empty-then-filled (the
-// colors swapped). Cells with more than one edge take the closest match.
-//
-// Without color the band is drawn in plain blocks: █ downloaded, ░ not
-// yet, ▓ or ▒ for a cell that is partly in, and no connection ticks.
+// Shade glyphs by level. In color the shades are drawn in blue over the
+// grey track, so the gaps in their dot patterns show the track rather
+// than the terminal background; full and empty cells are solid
+// background. Without color, ░ stands in for the track.
+var (
+	colorShades = []rune(" ░▒▓ ")
+	plainShades = []rune("░▒▒▓█")
+)
+
+// bandBar draws the file as a band, like IDM's "download progress by
+// connections" bar: downloaded ranges fill in at their place in the file,
+// so each chunk's fill grows rightward from its start. Each cell is shaded
+// by how much of it is downloaded.
 func bandBar(p downloader.Progress, width int, color bool) string {
 	filled := coverage(p, width*8)
-	markers := make([]bool, width)
-	if p.Total > 0 {
-		for _, c := range p.Chunks {
-			if c.State == downloader.ChunkActive {
-				markers[int(c.Offset*int64(width)/p.Total)] = true
-			}
-		}
-	}
-
 	var b strings.Builder
 	cur := ""
 	for i := range width {
-		var bits [8]bool
-		copy(bits[:], filled[i*8:])
+		n := 0
+		for _, f := range filled[i*8 : i*8+8] {
+			if f {
+				n++
+			}
+		}
+		lvl := shadeLevel(n)
 		if !color {
-			b.WriteRune(plainGlyph(bits))
+			b.WriteRune(plainShades[lvl])
 			continue
 		}
-		g, fg, bg := fitCell(bits)
-		if markers[i] {
-			// The tick replaces the cell's own edge; keep the color most of
-			// the cell has behind it.
-			n := 0
-			for _, f := range bits {
-				if f {
-					n++
-				}
-			}
-			g, fg, bg = '▏', bandMarker, bandTrack
-			if n >= 4 {
-				bg = bandFill
-			}
+		bg := bandTrack
+		if lvl == 4 {
+			bg = bandFill
 		}
-		if want := fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm", fg, bg); want != cur {
+		if want := fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm", bandFill, bg); want != cur {
 			b.WriteString(want)
 			cur = want
 		}
-		b.WriteRune(g)
+		b.WriteRune(colorShades[lvl])
 	}
 	if color {
 		b.WriteString(barReset)
 	}
 	return b.String()
-}
-
-// plainGlyph draws a cell without colors. An eighth block can't be used
-// for a partial cell here: its unfilled part would be blank, not ░, and
-// read as a gap between fill and track. Partial cells take a middle shade
-// instead.
-func plainGlyph(bits [8]bool) rune {
-	n := 0
-	for _, f := range bits {
-		if f {
-			n++
-		}
-	}
-	switch {
-	case n == 8:
-		return '█'
-	case n == 0:
-		return '░'
-	case n >= 4:
-		return '▓'
-	default:
-		return '▒'
-	}
-}
-
-// fitCell picks the glyph and colors that best draw one cell's eighths:
-// the first k eighths filled, or the last k, whichever differs from bits
-// in the fewest places.
-func fitCell(bits [8]bool) (glyph rune, fg, bg int) {
-	best, bestCost, suffix := 0, 9, false
-	for k := 0; k <= 8; k++ {
-		pre, suf := 0, 0
-		for i, f := range bits {
-			if f != (i < k) {
-				pre++
-			}
-			if f != (i >= 8-k) {
-				suf++
-			}
-		}
-		if pre < bestCost {
-			best, bestCost, suffix = k, pre, false
-		}
-		if suf < bestCost {
-			best, bestCost, suffix = k, suf, true
-		}
-	}
-	switch {
-	case best == 0:
-		return ' ', bandTrack, bandTrack
-	case best == 8:
-		return ' ', bandFill, bandFill
-	case suffix: // empty-then-filled: draw the empty part over a filled background
-		return leftEighths[8-best-1], bandTrack, bandFill
-	default:
-		return leftEighths[best-1], bandFill, bandTrack
-	}
 }
 
 // coverage splits the file into n equal units and reports which are

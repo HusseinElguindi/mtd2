@@ -27,9 +27,8 @@ func TestBar(t *testing.T) {
 			t.Errorf("bar(%d, %d) = %q, want %q", c.done, c.total, got, c.want)
 		}
 	}
-	// In color a chunk bar is a band with no connection tick.
-	want := fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm▏", bandFill, bandTrack) +
-		fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm   ", bandTrack, bandTrack) + barReset
+	// In color a chunk bar shades its partial cell over the track.
+	want := fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm░   ", bandFill, bandTrack) + barReset
 	if got := bar(1, 32, 4, true); got != want {
 		t.Errorf("color bar = %q, want %q", got, want)
 	}
@@ -43,7 +42,7 @@ func TestBandBarPlain(t *testing.T) {
 		{Offset: 200, Length: 100, Done: 0, State: downloader.ChunkPending},
 		{Offset: 300, Length: 100, Done: 25, State: downloader.ChunkActive},
 	}}
-	if got, want := bandBar(p, 4, false), "█▓░▒"; got != want {
+	if got, want := bandBar(p, 4, false), "█▒░▒"; got != want {
 		t.Errorf("bandBar = %q, want %q", got, want)
 	}
 
@@ -78,47 +77,24 @@ func TestBandBarCompleteIsSolid(t *testing.T) {
 	}
 }
 
-func TestFitCell(t *testing.T) {
-	b := func(s string) (bits [8]bool) {
-		for i, ch := range s {
-			bits[i] = ch == '#'
-		}
-		return
-	}
-	cases := []struct {
-		bits   string
-		glyph  rune
-		fg, bg int
-	}{
-		{"........", ' ', bandTrack, bandTrack},
-		{"########", ' ', bandFill, bandFill},
-		{"###.....", '▍', bandFill, bandTrack}, // fill ends 3/8 in
-		{".....###", '▋', bandTrack, bandFill}, // fill starts 5/8 in
-		{"##...###", '▋', bandTrack, bandFill}, // two edges: nearest single edge
-		{"#.......", '▏', bandFill, bandTrack},
-	}
-	for _, c := range cases {
-		g, fg, bg := fitCell(b(c.bits))
-		if g != c.glyph || fg != c.fg || bg != c.bg {
-			t.Errorf("fitCell(%s) = %q %d/%d, want %q %d/%d", c.bits, g, fg, bg, c.glyph, c.fg, c.bg)
+func TestShadeLevel(t *testing.T) {
+	for n, want := range []int{0, 1, 1, 2, 2, 2, 3, 3, 4} {
+		if got := shadeLevel(n); got != want {
+			t.Errorf("shadeLevel(%d) = %d, want %d", n, got, want)
 		}
 	}
 }
 
-// Each chunk's fill sits at its own place in the file and every chunk
-// start gets a tick.
+// In color each cell is a blue shade over the grey track, and full cells
+// are solid blue; there are no connection ticks.
 func TestBandBar(t *testing.T) {
 	p := downloader.Progress{Total: 400, Chunks: []downloader.ChunkProgress{
 		{Offset: 0, Length: 200, Done: 150, State: downloader.ChunkActive},
 		{Offset: 200, Length: 200, Done: 25, State: downloader.ChunkActive},
 	}}
-	// 4 cells of 100 bytes: cell 0 full (tick over fill), cell 1 half,
-	// cell 2 a quarter (tick over track), cell 3 empty.
-	tick := func(bg int) string { return fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm▏", bandMarker, bg) }
-	want := tick(bandFill) +
-		fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm▌", bandFill, bandTrack) +
-		tick(bandTrack) +
-		fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm ", bandTrack, bandTrack) + barReset
+	// 4 cells of 100 bytes: full, half, a quarter, empty.
+	want := fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm ", bandFill, bandFill) +
+		fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm▒░ ", bandFill, bandTrack) + barReset
 	if got := bandBar(p, 4, true); got != want {
 		t.Errorf("bandBar =\n%q\nwant\n%q", got, want)
 	}
