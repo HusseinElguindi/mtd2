@@ -145,31 +145,51 @@ func segmentBar(p downloader.Progress, width int, color bool) string {
 	if p.Total <= 0 {
 		return drawCells(cells, color)
 	}
-	span := float64(p.Total) / float64(width)
-	got := make([]float64, width) // downloaded bytes falling in each cell
+	// Cell i covers bytes [edge(i), edge(i+1)). Integer math keeps a
+	// fully downloaded cell at exactly 8 dots; float spans summed across a
+	// chunk boundary can land a hair under and floor to 7, leaving a
+	// notch in the top edge.
+	edge := func(i int) int64 { return p.Total * int64(i) / int64(width) }
+	// cellOf inverts edge: the last cell whose first byte is at or before b.
+	cellOf := func(b int64) int { return int(((b+1)*int64(width) - 1) / p.Total) }
+	got := make([]int64, width) // downloaded bytes falling in each cell
 	for _, c := range p.Chunks {
-		start, end := float64(c.Offset), float64(c.Offset+c.Done)
+		start, end := c.Offset, c.Offset+c.Done
 		if end <= start {
 			continue
 		}
-		first := int(start / span)
-		last := min(int((end-1)/span), width-1)
+		first, last := cellOf(start), min(cellOf(end-1), width-1)
 		for i := first; i <= last; i++ {
-			lo, hi := max(start, float64(i)*span), min(end, float64(i+1)*span)
-			got[i] += hi - lo
+			got[i] += min(end, edge(i+1)) - max(start, edge(i))
 		}
 		if c.State == downloader.ChunkActive && c.Done < c.Length {
 			cells[last].head = true
 		}
 	}
 	for i, g := range got {
-		lvl := int(g / span * 8)
+		span := edge(i+1) - edge(i)
+		if span == 0 { // file smaller than the bar: show the byte at edge(i)
+			if downloaded(p.Chunks, edge(i)) {
+				cells[i].level = 8
+			}
+			continue
+		}
+		lvl := int(g * 8 / span)
 		if g > 0 && lvl == 0 {
 			lvl = 1 // show that something landed here
 		}
 		cells[i].level = min(lvl, 8)
 	}
 	return drawCells(cells, color)
+}
+
+func downloaded(chunks []downloader.ChunkProgress, off int64) bool {
+	for _, c := range chunks {
+		if off >= c.Offset && off < c.Offset+c.Done {
+			return true
+		}
+	}
+	return false
 }
 
 func drawCells(cells []cell, color bool) string {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"mtd2/downloader"
@@ -54,5 +55,24 @@ func TestSegmentBar(t *testing.T) {
 	}}
 	if got, want := segmentBar(p, 2, false), "⣿⡀"; got != want {
 		t.Errorf("unaligned segmentBar = %q, want %q", got, want)
+	}
+}
+
+// A finished download must draw as a solid bar whatever the chunk and cell
+// boundaries, with no cell short a dot from rounding.
+func TestSegmentBarCompleteIsSolid(t *testing.T) {
+	for _, tc := range []struct{ total, chunk int64 }{
+		{64 << 20, 8 << 20}, {256 << 20, 16 << 20}, {1000003, 77777}, {7, 1},
+	} {
+		p := downloader.Progress{Total: tc.total}
+		for off, i := int64(0), 0; off < tc.total; off, i = off+tc.chunk, i+1 {
+			n := min(tc.chunk, tc.total-off)
+			p.Chunks = append(p.Chunks, downloader.ChunkProgress{Index: i, Offset: off, Length: n, Done: n, State: downloader.ChunkDone})
+		}
+		for _, w := range []int{20, 33, 40} {
+			if got := segmentBar(p, w, false); got != strings.Repeat("⣿", w) {
+				t.Errorf("total=%d chunk=%d width=%d: %q", tc.total, tc.chunk, w, got)
+			}
+		}
 	}
 }
