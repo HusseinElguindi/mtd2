@@ -148,3 +148,27 @@ func TestBandBar(t *testing.T) {
 		t.Errorf("bandBar =\n%q\nwant\n%q", got, want)
 	}
 }
+
+func TestActiveWindow(t *testing.T) {
+	p := downloader.Progress{Total: 1000, Chunks: []downloader.ChunkProgress{
+		{Index: 0, Offset: 0, Length: 100, Done: 100, State: downloader.ChunkDone},
+		{Index: 1, Offset: 100, Length: 100, Done: 40, State: downloader.ChunkActive},
+		{Index: 2, Offset: 200, Length: 100, Done: 100, State: downloader.ChunkDone},
+		{Index: 3, Offset: 300, Length: 100, Done: 10, State: downloader.ChunkActive},
+		{Index: 4, Offset: 400, Length: 600, Done: 0, State: downloader.ChunkPending},
+	}}
+	w, ok := activeWindow(p)
+	if !ok || w.Total != 300 || len(w.Chunks) != 3 {
+		t.Fatalf("activeWindow = %+v, %v; want chunks 1-3 over 300 bytes", w, ok)
+	}
+	for i, wantOff := range []int64{0, 100, 200} {
+		if w.Chunks[i].Offset != wantOff || w.Chunks[i].Index != i+1 {
+			t.Errorf("chunk %d: %+v, want index %d at offset %d", i, w.Chunks[i], i+1, wantOff)
+		}
+	}
+
+	p.Chunks[1].State, p.Chunks[3].State = downloader.ChunkDone, downloader.ChunkDone
+	if _, ok := activeWindow(p); ok {
+		t.Error("activeWindow with nothing active: ok = true")
+	}
+}

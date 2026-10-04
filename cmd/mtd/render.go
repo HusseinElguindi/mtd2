@@ -72,6 +72,9 @@ func (r *renderer) render(p downloader.Progress) {
 		}
 	}
 	line("total     %s", totalBar(p, totalBarWidth, r.color))
+	if w, ok := activeWindow(p); ok {
+		line("active    %s", totalBar(w, totalBarWidth, r.color))
+	}
 	line("          %s / %s  (%d/%d chunks)",
 		fmtBytes(p.Downloaded), fmtBytes(p.Total), chunksDone, len(p.Chunks))
 	line("%s", r.statsLine(p))
@@ -244,6 +247,36 @@ func drawCells(cells []cell, color bool) string {
 // totalBarWidth is wider than the per-chunk bars: the total bar maps the
 // whole file, so it needs the room to show each chunk's place in it.
 const totalBarWidth = 48
+
+// activeWindow zooms in on the stretch of the file the active chunks
+// span, as a Progress of its own. Chunks are handed out in file order, so
+// on a large file every connection works within a sliver of it that the
+// whole-file bar can't resolve; the zoomed bar shows each one. ok is
+// false when nothing is active or the window is already the whole file.
+func activeWindow(p downloader.Progress) (w downloader.Progress, ok bool) {
+	lo, hi := int64(-1), int64(-1)
+	for _, c := range p.Chunks {
+		if c.State != downloader.ChunkActive {
+			continue
+		}
+		if lo < 0 || c.Offset < lo {
+			lo = c.Offset
+		}
+		hi = max(hi, c.Offset+c.Length)
+	}
+	if lo < 0 || hi-lo >= p.Total {
+		return w, false
+	}
+	w.Total = hi - lo
+	for _, c := range p.Chunks {
+		if c.Offset >= hi || c.Offset+c.Length <= lo {
+			continue
+		}
+		c.Offset -= lo // chunks don't straddle active ones, so this stays in [0, w.Total)
+		w.Chunks = append(w.Chunks, c)
+	}
+	return w, true
+}
 
 // totalBar draws the whole-file map: a solid IDM-style band in color, or
 // the braille map when color is off (the band needs background colors).
