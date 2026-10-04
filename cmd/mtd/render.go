@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"strings"
 	"time"
@@ -18,7 +17,8 @@ type renderer struct {
 	out      io.Writer
 	tty      bool
 	interval time.Duration
-	lines    int // lines drawn by the previous frame, to move back over
+	color    bool // ANSI colors allowed (TTY and NO_COLOR unset)
+	lines    int  // lines drawn by the previous frame, to move back over
 }
 
 func newRenderer(out *os.File) *renderer {
@@ -28,7 +28,8 @@ func newRenderer(out *os.File) *renderer {
 	if tty {
 		interval = 100 * time.Millisecond
 	}
-	return &renderer{out: out, tty: tty, interval: interval}
+	color := tty && os.Getenv("NO_COLOR") == ""
+	return &renderer{out: out, tty: tty, color: color, interval: interval}
 }
 
 func (r *renderer) render(p downloader.Progress) {
@@ -61,7 +62,7 @@ func (r *renderer) render(p downloader.Progress) {
 		if c.State != downloader.ChunkActive {
 			continue
 		}
-		line("chunk %3d %s %9s / %s", c.Index, bar(c.Done, c.Length, 20),
+		line("chunk %3d %s %9s / %s", c.Index, bar(c.Done, c.Length, 20, r.color),
 			fmtBytes(c.Done), fmtBytes(c.Length))
 	}
 	chunksDone := 0
@@ -70,7 +71,7 @@ func (r *renderer) render(p downloader.Progress) {
 			chunksDone++
 		}
 	}
-	line("total     %s %9s / %s  (%d/%d chunks)", bar(p.Downloaded, p.Total, 20),
+	line("total     %s %9s / %s  (%d/%d chunks)", bar(p.Downloaded, p.Total, 20, r.color),
 		fmtBytes(p.Downloaded), fmtBytes(p.Total), chunksDone, len(p.Chunks))
 	line("%s", r.statsLine(p))
 	// The frame shrinks as chunks finish; clear whatever the previous,
@@ -101,17 +102,44 @@ func (r *renderer) statsLine(p downloader.Progress) string {
 		fmtBytes(int64(p.DiskRate)), fmtBytes(int64(p.AvgRate)), eta)
 }
 
-func bar(done, total int64, width int) string {
-	if total <= 0 {
-		return "[" + strings.Repeat(" ", width) + "]"
+// barEighths are the left-aligned partial blocks, ▏ (1/8) through ▉ (7/8),
+// which let a bar advance by an eighth of a cell instead of a whole one.
+var barEighths = []rune("▏▎▍▌▋▊▉")
+
+const (
+	barFill  = "\x1b[36m"       // cyan fill
+	barTrack = "\x1b[48;5;236m" // dark grey background for the unfilled track
+	barReset = "\x1b[0m"
+)
+
+// bar draws a smooth bar width cells wide: full blocks for the filled part,
+// one partial eighth-block at the leading edge, and a shaded background
+// track behind the rest. With color off, the track is drawn with ░ instead.
+func bar(done, total int64, width int, color bool) string {
+	eighths := 0
+	if total > 0 {
+		eighths = int(float64(done) / float64(total) * float64(width*8))
+		eighths = min(max(eighths, 0), width*8)
 	}
-	filled := int(math.Round(float64(done) / float64(total) * float64(width)))
-	filled = min(max(filled, 0), width)
-	b := strings.Repeat("=", filled)
-	if filled > 0 && filled < width {
-		b = b[:filled-1] + ">"
+	full, part := eighths/8, eighths%8
+
+	var b strings.Builder
+	if color {
+		b.WriteString(barTrack + barFill)
 	}
-	return "[" + b + strings.Repeat(" ", width-filled) + "]"
+	b.WriteString(strings.Repeat("█", full))
+	rest := width - full
+	if part > 0 {
+		b.WriteRune(barEighths[part-1])
+		rest--
+	}
+	if color {
+		b.WriteString(strings.Repeat(" ", rest))
+		b.WriteString(barReset)
+	} else {
+		b.WriteString(strings.Repeat("░", rest))
+	}
+	return b.String()
 }
 
 func fmtBytes(n int64) string {
