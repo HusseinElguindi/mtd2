@@ -308,11 +308,19 @@ var leftEighths = []rune("▏▎▍▌▋▊▉")
 // colors swapped). Cells with more than one edge take the closest match.
 func bandBar(p downloader.Progress, width int) string {
 	filled := coverage(p, width*8)
-	markers := make([]bool, width)
+	// markers[i] is the eighth (counted across the whole bar) where an
+	// active chunk starting in cell i begins, or -1 for no tick.
+	markers := make([]int, width)
+	for i := range markers {
+		markers[i] = -1
+	}
 	if p.Total > 0 {
 		for _, c := range p.Chunks {
 			if c.State == downloader.ChunkActive {
-				markers[int(c.Offset*int64(width)/p.Total)] = true
+				e := int(c.Offset * int64(width*8) / p.Total)
+				if markers[e/8] < 0 {
+					markers[e/8] = e
+				}
 			}
 		}
 	}
@@ -323,17 +331,15 @@ func bandBar(p downloader.Progress, width int) string {
 		var bits [8]bool
 		copy(bits[:], filled[i*8:])
 		g, fg, bg := fitCell(bits)
-		if markers[i] {
-			// The tick replaces the cell's own edge; keep the color most of
-			// the cell has behind it.
-			n := 0
-			for _, f := range bits {
-				if f {
-					n++
-				}
-			}
+		if e := markers[i]; e >= 0 {
+			// The tick replaces the cell's own edge. A chunk usually starts
+			// mid-cell, after a stretch of the previous chunk that isn't in
+			// yet, so judge the color behind the tick by the chunk's own
+			// start: once it has data, blue follows the tick at once. The
+			// eighth it starts in can be mostly the previous chunk's, so
+			// the one after counts too.
 			g, fg, bg = '▏', bandMarker, bandTrack
-			if n >= 4 {
+			if filled[e] || e+1 < len(filled) && filled[e+1] {
 				bg = bandFill
 			}
 		}

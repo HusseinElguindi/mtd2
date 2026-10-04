@@ -138,14 +138,37 @@ func TestBandBar(t *testing.T) {
 		{Offset: 200, Length: 200, Done: 25, State: downloader.ChunkActive},
 	}}
 	// 4 cells of 100 bytes: cell 0 full (tick over fill), cell 1 half,
-	// cell 2 a quarter (tick over track), cell 3 empty.
+	// cell 2 a quarter (tick over fill: the chunk has started), cell 3
+	// empty.
 	tick := func(bg int) string { return fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm▏", bandMarker, bg) }
 	want := tick(bandFill) +
 		fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm▌", bandFill, bandTrack) +
-		tick(bandTrack) +
+		tick(bandFill) +
 		fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm ", bandTrack, bandTrack) + barReset
 	if got := bandBar(p, 4); got != want {
 		t.Errorf("bandBar =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// A chunk that starts mid-cell, after a stretch that isn't in yet, still
+// gets blue right behind its tick rather than the track.
+func TestBandBarTickMidCell(t *testing.T) {
+	p := downloader.Progress{Total: 160, Chunks: []downloader.ChunkProgress{
+		{Offset: 0, Length: 50, Done: 0, State: downloader.ChunkPending},
+		{Offset: 50, Length: 110, Done: 20, State: downloader.ChunkActive},
+	}}
+	want := fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm▏", bandMarker, bandFill) +
+		fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm ", bandTrack, bandTrack) + barReset
+	if got := bandBar(p, 2); got != want {
+		t.Errorf("bandBar =\n%q\nwant\n%q", got, want)
+	}
+
+	// Before its first byte lands the tick sits on the track.
+	p.Chunks[1].Done = 0
+	want = fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm▏", bandMarker, bandTrack) +
+		fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm ", bandTrack, bandTrack) + barReset
+	if got := bandBar(p, 2); got != want {
+		t.Errorf("bandBar before first byte =\n%q\nwant\n%q", got, want)
 	}
 }
 
