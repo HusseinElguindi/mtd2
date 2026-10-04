@@ -41,8 +41,13 @@ func (r *renderer) render(p downloader.Progress) {
 	}
 
 	var b strings.Builder
+	// Turn off autowrap for the frame: \x1b[%dA moves up screen rows, not
+	// lines, so a line wider than the terminal would wrap onto a second row
+	// and the next frame would start too low. Long lines are cut at the
+	// right edge instead.
+	b.WriteString("\x1b[?7l")
 	// Return to the top of the previous frame; \x1b[2K clears each line as
-	// it is redrawn, so shorter frames leave no residue.
+	// it is redrawn.
 	if r.lines > 0 {
 		fmt.Fprintf(&b, "\x1b[%dA", r.lines)
 	}
@@ -68,6 +73,9 @@ func (r *renderer) render(p downloader.Progress) {
 	line("total     %s %9s / %s  (%d/%d chunks)", bar(p.Downloaded, p.Total, 20),
 		fmtBytes(p.Downloaded), fmtBytes(p.Total), chunksDone, len(p.Chunks))
 	line("%s", r.statsLine(p))
+	// The frame shrinks as chunks finish; clear whatever the previous,
+	// taller frame left below this one, then restore autowrap.
+	b.WriteString("\x1b[J\x1b[?7h")
 
 	r.lines = lines
 	io.WriteString(r.out, b.String())
