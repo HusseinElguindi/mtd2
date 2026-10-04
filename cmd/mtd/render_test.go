@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -99,5 +100,51 @@ func TestSegmentBarCompleteIsSolid(t *testing.T) {
 				t.Errorf("total=%d chunk=%d width=%d: %q", tc.total, tc.chunk, w, got)
 			}
 		}
+	}
+}
+
+func TestFitCell(t *testing.T) {
+	b := func(s string) (bits [8]bool) {
+		for i, ch := range s {
+			bits[i] = ch == '#'
+		}
+		return
+	}
+	cases := []struct {
+		bits   string
+		glyph  rune
+		fg, bg int
+	}{
+		{"........", ' ', bandTrack, bandTrack},
+		{"########", ' ', bandFill, bandFill},
+		{"###.....", '▍', bandFill, bandTrack}, // fill ends 3/8 in
+		{".....###", '▋', bandTrack, bandFill}, // fill starts 5/8 in
+		{"##...###", '▋', bandTrack, bandFill}, // two edges: nearest single edge
+		{"#.......", '▏', bandFill, bandTrack},
+	}
+	for _, c := range cases {
+		g, fg, bg := fitCell(b(c.bits))
+		if g != c.glyph || fg != c.fg || bg != c.bg {
+			t.Errorf("fitCell(%s) = %q %d/%d, want %q %d/%d", c.bits, g, fg, bg, c.glyph, c.fg, c.bg)
+		}
+	}
+}
+
+// Each chunk's fill sits at its own place in the file and every chunk
+// start gets a tick.
+func TestBandBar(t *testing.T) {
+	p := downloader.Progress{Total: 400, Chunks: []downloader.ChunkProgress{
+		{Offset: 0, Length: 200, Done: 150, State: downloader.ChunkActive},
+		{Offset: 200, Length: 200, Done: 25, State: downloader.ChunkActive},
+	}}
+	// 4 cells of 100 bytes: cell 0 full (tick over fill), cell 1 half,
+	// cell 2 a quarter (tick over track), cell 3 empty.
+	tick := func(bg int) string { return fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm▏", bandMarker, bg) }
+	want := tick(bandFill) +
+		fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm▌", bandFill, bandTrack) +
+		tick(bandTrack) +
+		fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm ", bandTrack, bandTrack) + barReset
+	if got := bandBar(p, 4); got != want {
+		t.Errorf("bandBar =\n%q\nwant\n%q", got, want)
 	}
 }

@@ -71,7 +71,8 @@ func (r *renderer) render(p downloader.Progress) {
 			chunksDone++
 		}
 	}
-	line("total     %s %9s / %s  (%d/%d chunks)", segmentBar(p, 20, r.color),
+	line("total     %s", totalBar(p, totalBarWidth, r.color))
+	line("          %s / %s  (%d/%d chunks)",
 		fmtBytes(p.Downloaded), fmtBytes(p.Total), chunksDone, len(p.Chunks))
 	line("%s", r.statsLine(p))
 	// The frame shrinks as chunks finish; clear whatever the previous,
@@ -238,6 +239,143 @@ func drawCells(cells []cell, color bool) string {
 		b.WriteString(barReset)
 	}
 	return b.String()
+}
+
+// totalBarWidth is wider than the per-chunk bars: the total bar maps the
+// whole file, so it needs the room to show each chunk's place in it.
+const totalBarWidth = 48
+
+// totalBar draws the whole-file map: a solid IDM-style band in color, or
+// the braille map when color is off (the band needs background colors).
+func totalBar(p downloader.Progress, width int, color bool) string {
+	if !color {
+		return segmentBar(p, width, false)
+	}
+	return bandBar(p, width)
+}
+
+const (
+	bandFill   = 33  // blue: downloaded
+	bandTrack  = 237 // dark grey: not yet downloaded
+	bandMarker = 196 // red: where each chunk starts
+)
+
+// leftEighths[k-1] fills the left k/8 of a cell with the foreground color;
+// the rest of the cell shows the background.
+var leftEighths = []rune("▏▎▍▌▋▊▉")
+
+// bandBar draws the file as a solid band, like IDM's "download progress by
+// connections" bar: downloaded ranges are filled in blue at their place in
+// the file, so each chunk's fill grows rightward from its start, and a red
+// tick marks where each active connection started.
+//
+// Each cell is split into eighths. A terminal cell has only two colors, so
+// a cell can show exactly one fill edge: filled-then-empty (fill colored
+// eighth block over the track background) or empty-then-filled (the
+// colors swapped). Cells with more than one edge take the closest match.
+func bandBar(p downloader.Progress, width int) string {
+	filled := coverage(p, width*8)
+	markers := make([]bool, width)
+	if p.Total > 0 {
+		for _, c := range p.Chunks {
+			if c.State == downloader.ChunkActive {
+				markers[int(c.Offset*int64(width)/p.Total)] = true
+			}
+		}
+	}
+
+	var b strings.Builder
+	cur := ""
+	for i := range width {
+		var bits [8]bool
+		copy(bits[:], filled[i*8:])
+		g, fg, bg := fitCell(bits)
+		if markers[i] {
+			// The tick replaces the cell's own edge; keep the color most of
+			// the cell has behind it.
+			n := 0
+			for _, f := range bits {
+				if f {
+					n++
+				}
+			}
+			g, fg, bg = '▏', bandMarker, bandTrack
+			if n >= 4 {
+				bg = bandFill
+			}
+		}
+		if want := fmt.Sprintf("\x1b[38;5;%dm\x1b[48;5;%dm", fg, bg); want != cur {
+			b.WriteString(want)
+			cur = want
+		}
+		b.WriteRune(g)
+	}
+	b.WriteString(barReset)
+	return b.String()
+}
+
+// fitCell picks the glyph and colors that best draw one cell's eighths:
+// the first k eighths filled, or the last k, whichever differs from bits
+// in the fewest places.
+func fitCell(bits [8]bool) (glyph rune, fg, bg int) {
+	best, bestCost, suffix := 0, 9, false
+	for k := 0; k <= 8; k++ {
+		pre, suf := 0, 0
+		for i, f := range bits {
+			if f != (i < k) {
+				pre++
+			}
+			if f != (i >= 8-k) {
+				suf++
+			}
+		}
+		if pre < bestCost {
+			best, bestCost, suffix = k, pre, false
+		}
+		if suf < bestCost {
+			best, bestCost, suffix = k, suf, true
+		}
+	}
+	switch {
+	case best == 0:
+		return ' ', bandTrack, bandTrack
+	case best == 8:
+		return ' ', bandFill, bandFill
+	case suffix: // empty-then-filled: draw the empty part over a filled background
+		return leftEighths[8-best-1], bandTrack, bandFill
+	default:
+		return leftEighths[best-1], bandFill, bandTrack
+	}
+}
+
+// coverage splits the file into n equal units and reports which are
+// downloaded: a unit counts once at least half its bytes are in. Units
+// smaller than a byte (a file shorter than n) take the byte they start on.
+func coverage(p downloader.Progress, n int) []bool {
+	out := make([]bool, n)
+	if p.Total <= 0 {
+		return out
+	}
+	edge := func(j int) int64 { return p.Total * int64(j) / int64(n) }
+	unitOf := func(b int64) int { return int(((b+1)*int64(n) - 1) / p.Total) }
+	got := make([]int64, n)
+	for _, c := range p.Chunks {
+		start, end := c.Offset, c.Offset+c.Done
+		if end <= start {
+			continue
+		}
+		for j := unitOf(start); j <= unitOf(end-1); j++ {
+			got[j] += min(end, edge(j+1)) - max(start, edge(j))
+		}
+	}
+	for j, g := range got {
+		if span := edge(j+1) - edge(j); span > 0 {
+			out[j] = g*2 >= span
+		} else {
+			out[j] = downloaded(p.Chunks, edge(j))
+		}
+	}
+	return out
 }
 
 func fmtBytes(n int64) string {
