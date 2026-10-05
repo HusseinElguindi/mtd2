@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/term"
 
@@ -20,9 +21,29 @@ type renderer struct {
 	fd       int // out's file descriptor, for the terminal size
 	tty      bool
 	interval time.Duration
-	color    bool  // ANSI colors allowed (TTY and NO_COLOR unset)
-	lines    int   // lines drawn by the previous frame, to move back over
-	rows     []int // chunk index on each row of the previous frame's chunk list
+	color    bool      // ANSI colors allowed (TTY and NO_COLOR unset)
+	drawn    []int     // screen width of each line of the previous frame, to move back over
+	rows     []int     // chunk index on each row of the previous frame's chunk list
+	size     [2]int    // terminal columns and rows when last checked
+	settle   time.Time // don't draw before this: the terminal is being resized
+}
+
+// resizeSettle is how long the terminal size must hold still before the
+// renderer draws again after a resize.
+//
+// A terminal that reflows rewraps the frame on screen the moment it is
+// resized, and frameRows can only predict that from the size the frame
+// will be drawn at. While a resize is under way (dragging a split, say)
+// the size changes faster than frames go out, so a frame computed for one
+// width lands on a screen already reflowed to another, the move back up
+// comes out wrong, and pieces of old frames are left on screen. Holding
+// off until the size has settled means the terminal only ever reflows the
+// last frame, which frameRows accounts for.
+const resizeSettle = 200 * time.Millisecond
+
+// resized tells the renderer the terminal size is changing (SIGWINCH).
+func (r *renderer) resized() {
+	r.settle = time.Now().Add(resizeSettle)
 }
 
 func newRenderer(out *os.File) *renderer {
@@ -45,6 +66,21 @@ func (r *renderer) render(p downloader.Progress) {
 		return
 	}
 
+	cols, rows, err := term.GetSize(r.fd)
+	if err != nil {
+		cols, rows = 0, 0
+	}
+	// Watch the size here too, for when there is no SIGWINCH to say so.
+	if size := [2]int{cols, rows}; size != r.size {
+		if r.size != [2]int{} {
+			r.resized()
+		}
+		r.size = size
+	}
+	if time.Now().Before(r.settle) {
+		return
+	}
+
 	var b strings.Builder
 	// Ask the terminal to hold the frame and show it all at once (where
 	// synchronized output is supported; others ignore it), and hide the
@@ -56,16 +92,24 @@ func (r *renderer) render(p downloader.Progress) {
 	// right edge instead.
 	b.WriteString("\x1b[?7l")
 	// Return to the top of the previous frame.
-	if r.lines > 0 {
-		fmt.Fprintf(&b, "\x1b[%dA", r.lines)
+	if up := frameRows(r.drawn, cols); up > 0 {
+		fmt.Fprintf(&b, "\x1b[%dA", up)
 	}
-	lines := 0
-	// Each line overwrites the previous frame's and then erases what is
-	// left of it (\x1b[K), rather than blanking the row first, so no row
-	// is ever shown empty.
+	var drawn []int
+	// Each row is erased whole (\x1b[2K) before it is drawn: besides the
+	// old text, that clears the mark a reflowing terminal leaves on a row it
+	// split when it narrowed, which would otherwise join the row to the next
+	// one when the terminal widens again. Synchronized output keeps the
+	// blank row from showing. \x1b[K after the text clears the last column
+	// of a line cut off at the right edge.
 	line := func(format string, args ...any) {
-		fmt.Fprintf(&b, format+"\x1b[K\n", args...)
-		lines++
+		s := fmt.Sprintf(format, args...)
+		b.WriteString("\x1b[2K" + s + "\x1b[K\n")
+		w := screenWidth(s)
+		if cols > 0 {
+			w = min(w, cols) // the rest was cut off at the right edge
+		}
+		drawn = append(drawn, w)
 	}
 
 	chunksDone := 0
@@ -85,7 +129,7 @@ func (r *renderer) render(p downloader.Progress) {
 	// lower. Past the screen height, list as many chunks as fit and count
 	// the rest on one line.
 	shown := len(r.rows)
-	if _, rows, err := term.GetSize(r.fd); err == nil {
+	if rows > 0 {
 		// One row is left for the cursor, which sits below the frame.
 		if room := rows - 1 - footer; shown > room {
 			shown = max(room-1, 0)
@@ -111,8 +155,47 @@ func (r *renderer) render(p downloader.Progress) {
 	// cursor and let the terminal show the frame.
 	b.WriteString("\x1b[J\x1b[?7h\x1b[?25h\x1b[?2026l")
 
-	r.lines = lines
+	r.drawn = drawn
 	io.WriteString(r.out, b.String())
+}
+
+// frameRows is how many screen rows a frame whose lines were drawn at the
+// given widths takes up now that the terminal is cols wide. Most terminals,
+// tmux included, reflow on resize: when the terminal narrows, a line wider
+// than it is rewrapped onto more rows, which moves the top of the frame up.
+// (Widening never rejoins lines that were drawn as separate lines, so each
+// still takes at least one row.)
+func frameRows(widths []int, cols int) int {
+	n := 0
+	for _, w := range widths {
+		if cols > 0 && w > cols {
+			n += (w + cols - 1) / cols
+		} else {
+			n++
+		}
+	}
+	return n
+}
+
+// screenWidth is how many columns s takes on screen: its runes, less ANSI
+// escape sequences. Everything the renderer draws is one column wide.
+func screenWidth(s string) int {
+	w := 0
+	for i := 0; i < len(s); {
+		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '[' {
+			// CSI: parameters, then a final byte in @-~.
+			i += 2
+			for i < len(s) && (s[i] < '@' || s[i] > '~') {
+				i++
+			}
+			i++
+			continue
+		}
+		_, size := utf8.DecodeRuneInString(s[i:])
+		i += size
+		w++
+	}
+	return w
 }
 
 // assignRows keeps each active chunk on the row it had in the previous
@@ -147,9 +230,13 @@ func assignRows(prev []int, chunks []downloader.ChunkProgress) []int {
 	return append(rows, started...)
 }
 
-// finish leaves the last frame in place and moves on.
-func (r *renderer) finish() {
-	r.lines = 0
+// finish draws the last frame, even mid-resize, leaves it in place and
+// moves on.
+func (r *renderer) finish(p downloader.Progress) {
+	r.settle = time.Time{}
+	r.size = [2]int{}
+	r.render(p)
+	r.drawn = nil
 	r.rows = nil
 }
 
