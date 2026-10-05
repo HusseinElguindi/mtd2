@@ -275,3 +275,39 @@ func TestAssignRows(t *testing.T) {
 		}
 	}
 }
+
+func TestScreenWidth(t *testing.T) {
+	cases := []struct {
+		s    string
+		want int
+	}{
+		{"", 0},
+		{"total", 5},
+		{"⣿⣷⣀", 3},
+		{"\x1b[36m⣿\x1b[0m⣀", 2},
+		{"\x1b[38;5;238m▕\x1b[48;2;1;2;3m \x1b[0m", 2},
+	}
+	for _, c := range cases {
+		if got := screenWidth(c.s); got != c.want {
+			t.Errorf("screenWidth(%q) = %d, want %d", c.s, got, c.want)
+		}
+	}
+}
+
+func TestFrameRows(t *testing.T) {
+	widths := []int{50, 80, 10}
+	cases := []struct {
+		cols, want int
+	}{
+		{0, 3},   // unknown size: one row per line
+		{120, 3}, // all fit
+		{80, 3},  // exactly fits
+		{60, 4},  // the 80-wide line wraps once
+		{40, 5},  // 2 + 2 + 1
+	}
+	for _, c := range cases {
+		if got := frameRows(widths, c.cols); got != c.want {
+			t.Errorf("frameRows(%v, %d) = %d, want %d", widths, c.cols, got, c.want)
+		}
+	}
+}
