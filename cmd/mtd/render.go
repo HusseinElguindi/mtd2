@@ -65,12 +65,15 @@ func (r *renderer) render(p downloader.Progress) {
 		fmt.Fprintf(&b, "\x1b[%dA", up)
 	}
 	var drawn []int
-	// Each line overwrites the previous frame's and then erases what is
-	// left of it (\x1b[K), rather than blanking the row first, so no row
-	// is ever shown empty.
+	// Each row is erased whole (\x1b[2K) before it is drawn: besides the
+	// old text, that clears the mark a reflowing terminal leaves on a row it
+	// split when it narrowed, which would otherwise join the row to the next
+	// one when the terminal widens again. Synchronized output keeps the
+	// blank row from showing. \x1b[K after the text clears the last column
+	// of a line cut off at the right edge.
 	line := func(format string, args ...any) {
 		s := fmt.Sprintf(format, args...)
-		b.WriteString(s + "\x1b[K\n")
+		b.WriteString("\x1b[2K" + s + "\x1b[K\n")
 		w := screenWidth(s)
 		if cols > 0 {
 			w = min(w, cols) // the rest was cut off at the right edge
