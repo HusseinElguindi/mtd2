@@ -21,9 +21,29 @@ type renderer struct {
 	fd       int // out's file descriptor, for the terminal size
 	tty      bool
 	interval time.Duration
-	color    bool  // ANSI colors allowed (TTY and NO_COLOR unset)
-	drawn    []int // screen width of each line of the previous frame, to move back over
-	rows     []int // chunk index on each row of the previous frame's chunk list
+	color    bool      // ANSI colors allowed (TTY and NO_COLOR unset)
+	drawn    []int     // screen width of each line of the previous frame, to move back over
+	rows     []int     // chunk index on each row of the previous frame's chunk list
+	size     [2]int    // terminal columns and rows when last checked
+	settle   time.Time // don't draw before this: the terminal is being resized
+}
+
+// resizeSettle is how long the terminal size must hold still before the
+// renderer draws again after a resize.
+//
+// A terminal that reflows rewraps the frame on screen the moment it is
+// resized, and frameRows can only predict that from the size the frame
+// will be drawn at. While a resize is under way (dragging a split, say)
+// the size changes faster than frames go out, so a frame computed for one
+// width lands on a screen already reflowed to another, the move back up
+// comes out wrong, and pieces of old frames are left on screen. Holding
+// off until the size has settled means the terminal only ever reflows the
+// last frame, which frameRows accounts for.
+const resizeSettle = 200 * time.Millisecond
+
+// resized tells the renderer the terminal size is changing (SIGWINCH).
+func (r *renderer) resized() {
+	r.settle = time.Now().Add(resizeSettle)
 }
 
 func newRenderer(out *os.File) *renderer {
@@ -46,6 +66,21 @@ func (r *renderer) render(p downloader.Progress) {
 		return
 	}
 
+	cols, rows, err := term.GetSize(r.fd)
+	if err != nil {
+		cols, rows = 0, 0
+	}
+	// Watch the size here too, for when there is no SIGWINCH to say so.
+	if size := [2]int{cols, rows}; size != r.size {
+		if r.size != [2]int{} {
+			r.resized()
+		}
+		r.size = size
+	}
+	if time.Now().Before(r.settle) {
+		return
+	}
+
 	var b strings.Builder
 	// Ask the terminal to hold the frame and show it all at once (where
 	// synchronized output is supported; others ignore it), and hide the
@@ -56,10 +91,6 @@ func (r *renderer) render(p downloader.Progress) {
 	// and the next frame would start too low. Long lines are cut at the
 	// right edge instead.
 	b.WriteString("\x1b[?7l")
-	cols, rows, err := term.GetSize(r.fd)
-	if err != nil {
-		cols, rows = 0, 0
-	}
 	// Return to the top of the previous frame.
 	if up := frameRows(r.drawn, cols); up > 0 {
 		fmt.Fprintf(&b, "\x1b[%dA", up)
@@ -199,8 +230,12 @@ func assignRows(prev []int, chunks []downloader.ChunkProgress) []int {
 	return append(rows, started...)
 }
 
-// finish leaves the last frame in place and moves on.
-func (r *renderer) finish() {
+// finish draws the last frame, even mid-resize, leaves it in place and
+// moves on.
+func (r *renderer) finish(p downloader.Progress) {
+	r.settle = time.Time{}
+	r.size = [2]int{}
+	r.render(p)
 	r.drawn = nil
 	r.rows = nil
 }

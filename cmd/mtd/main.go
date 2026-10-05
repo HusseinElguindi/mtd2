@@ -122,18 +122,22 @@ func run(rawURL, output string, concurrency int, chunkSizeArg string, restart, f
 	r := newRenderer(os.Stderr)
 	ticker := time.NewTicker(r.interval)
 	defer ticker.Stop()
+	winch := make(chan os.Signal, 1)
+	notifyResize(winch)
+	defer signal.Stop(winch)
 	var runErr error
 loop:
 	for {
 		select {
 		case runErr = <-done:
 			break loop
+		case <-winch:
+			r.resized()
 		case <-ticker.C:
 			r.render(d.Progress())
 		}
 	}
-	r.render(d.Progress())
-	r.finish()
+	r.finish(d.Progress())
 
 	if runErr != nil {
 		if errors.Is(runErr, downloader.ErrOutputExists) {
