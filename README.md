@@ -15,7 +15,7 @@ go build ./cmd/mtdserve   # optional: local test server
 ## Usage
 
 ```
-mtd [-o output] [-c concurrency] [-s chunk-size] [-f] [--restart] <url>
+mtd [-o output] [-c concurrency] [-s chunk-size] [-f] [-A user-agent] [--restart] <url>
 ```
 
 | Flag | Meaning |
@@ -26,6 +26,7 @@ mtd [-o output] [-c concurrency] [-s chunk-size] [-f] [--restart] <url>
 | `-f` | overwrite an existing output file |
 | `--restart` | discard saved state and partial data, start over |
 | `-v` | dump HTTP request/response headers to stderr |
+| `-A` | `User-Agent` header to send (default `mtd`) |
 
 ## Resume
 

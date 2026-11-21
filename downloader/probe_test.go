@@ -14,6 +14,9 @@ func TestProbeRangeSupported(t *testing.T) {
 	blob := bytes.Repeat([]byte("x"), 4096)
 	modTime := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("User-Agent"); got != DefaultUserAgent {
+			t.Errorf("User-Agent = %q, want %q", got, DefaultUserAgent)
+		}
 		if got := r.Header.Get("Range"); got != "bytes=0-0" {
 			t.Errorf("Range header = %q, want %q", got, "bytes=0-0")
 		}

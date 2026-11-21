@@ -107,6 +107,30 @@ type Options struct {
 	// Force permits overwriting an existing file at Output, both at start
 	// and at the completion rename.
 	Force bool
+	// UserAgent is the User-Agent header sent on every request. Defaults
+	// to DefaultUserAgent.
+	UserAgent string
+}
+
+// DefaultUserAgent is the User-Agent sent when Options.UserAgent is empty.
+// Requests must not go out under Go's stock "Go-http-client/1.1": web
+// application firewalls (ModSecurity's common rule sets among them) list
+// it as a scripted client and answer 406 or 403 before the origin sees the
+// request, so a file that curl and browsers fetch fine fails at the probe.
+const DefaultUserAgent = "mtd"
+
+// newRequest builds a GET for url carrying userAgent. Every request the
+// package sends goes through here, so none can fall back to Go's default
+// User-Agent. The header is set on the request, not in a wrapping
+// transport, so it also applies when the caller supplies Options.Client;
+// Go's client copies it onto redirect hops.
+func newRequest(ctx context.Context, url, userAgent string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	return req, nil
 }
 
 // NewTransport returns the HTTP transport the downloader uses by default:
@@ -267,7 +291,7 @@ func (d *Downloader) setFetchURL(u string) {
 // with parallel re-mints it may rate-limit.
 func (d *Downloader) refreshFetchURL(ctx context.Context) {
 	d.refreshGroup.Do("refresh", func() (any, error) {
-		probe, err := Probe(ctx, d.client, d.opts.URL)
+		probe, err := probe(ctx, d.client, d.opts.URL, d.opts.UserAgent)
 		if err != nil || probe.FinalURL == "" {
 			return nil, nil
 		}
@@ -316,6 +340,9 @@ func New(opts Options) (*Downloader, error) {
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = DefaultConcurrency
 	}
+	if opts.UserAgent == "" {
+		opts.UserAgent = DefaultUserAgent
+	}
 	// A pasted URL can carry the same illegal query bytes a redirect can
 	// (net/url keeps RawQuery verbatim); sanitize it once so every request
 	// and the state file's identity use the escaped form consistently.
@@ -345,7 +372,7 @@ func (d *Downloader) Run(ctx context.Context) error {
 		}
 	}
 
-	probe, err := Probe(ctx, d.client, d.opts.URL)
+	probe, err := probe(ctx, d.client, d.opts.URL, d.opts.UserAgent)
 	if err != nil {
 		return err
 	}
@@ -549,7 +576,7 @@ func (d *Downloader) fetchChunk(ctx context.Context, f *os.File, c *chunk) error
 		return nil
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.getFetchURL(), nil)
+	req, err := newRequest(ctx, d.getFetchURL(), d.opts.UserAgent)
 	if err != nil {
 		return err
 	}
@@ -626,7 +653,7 @@ func (d *Downloader) copyToFile(f *os.File, body io.Reader, off int64, done *ato
 // coalescing write loop. When the size is known the file is represented as
 // a single chunk so progress reporting still works.
 func (d *Downloader) singleStream(ctx context.Context, f *os.File) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.getFetchURL(), nil)
+	req, err := newRequest(ctx, d.getFetchURL(), d.opts.UserAgent)
 	if err != nil {
 		return err
 	}

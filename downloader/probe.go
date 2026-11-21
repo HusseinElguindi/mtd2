@@ -40,8 +40,15 @@ const probeDrainLimit = 4 << 10
 // reliable than HEAD across servers. A 206 response with a Content-Range
 // total confirms range support; a 200 response means the server ignored
 // the Range header, so only a single-stream download is possible.
+//
+// The request identifies itself as DefaultUserAgent; a Downloader probes
+// with its own Options.UserAgent instead.
 func Probe(ctx context.Context, client *http.Client, url string) (ProbeResult, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	return probe(ctx, client, url, DefaultUserAgent)
+}
+
+func probe(ctx context.Context, client *http.Client, url, userAgent string) (ProbeResult, error) {
+	req, err := newRequest(ctx, url, userAgent)
 	if err != nil {
 		return ProbeResult{}, err
 	}
