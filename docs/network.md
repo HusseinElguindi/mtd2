@@ -167,6 +167,15 @@ lives in the code comments there:
   verbatim as a malformed request target, drawing an opaque `400` from
   the server's request parser.
 
+One default lives on the requests rather than the client: every request
+carries **`User-Agent: mtd`** (`DefaultUserAgent`, overridable with
+`Options.UserAgent` or the CLI's `-A`). Go's stock `Go-http-client/1.1`
+is on the scripted-client lists of common firewall rule sets — an Apache
+host behind ModSecurity answered the probe with `406 Not Acceptable`
+while serving the same URL to curl. The header is set per request, not
+in a wrapping transport, so it also applies to a caller-supplied
+`Options.Client`.
+
 The transport underneath comes from `NewTransport`, which adds the
 pool sizing described under [connection reuse](#what-a-chunk-request-costs-connection-reuse)
 above. A caller that passes its own transport — the CLI does, to layer

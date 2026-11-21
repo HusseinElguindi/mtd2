@@ -52,8 +52,9 @@ func main() {
 	restart := flag.Bool("restart", false, "discard any saved state and partial file, start over")
 	force := flag.Bool("f", false, "overwrite an existing output file")
 	verbose := flag.Bool("v", false, "dump HTTP request/response headers to stderr")
+	userAgent := flag.String("A", "", "User-Agent header to send (default \""+downloader.DefaultUserAgent+"\")")
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "usage: mtd [-o output] [-c concurrency] [-s chunk-size] [-f] [--restart] <url>\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "usage: mtd [-o output] [-c concurrency] [-s chunk-size] [-f] [-A user-agent] [--restart] <url>\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -61,13 +62,13 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
-	if err := run(flag.Arg(0), *output, *concurrency, *chunkSize, *restart, *force, *verbose); err != nil {
+	if err := run(flag.Arg(0), *output, *concurrency, *chunkSize, *restart, *force, *verbose, *userAgent); err != nil {
 		fmt.Fprintln(os.Stderr, "mtd:", err)
 		os.Exit(1)
 	}
 }
 
-func run(rawURL, output string, concurrency int, chunkSizeArg string, restart, force, verbose bool) error {
+func run(rawURL, output string, concurrency int, chunkSizeArg string, restart, force, verbose bool, userAgent string) error {
 	if output == "" {
 		var err error
 		if output, err = defaultOutput(rawURL); err != nil {
@@ -107,6 +108,7 @@ func run(rawURL, output string, concurrency int, chunkSizeArg string, restart, f
 		ChunkSize:   chunkSize,
 		Client:      client,
 		Force:       force,
+		UserAgent:   userAgent,
 	})
 	if err != nil {
 		return err

@@ -11,7 +11,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -624,5 +626,102 @@ func TestRenameBlockedKeepsPartAndState(t *testing.T) {
 	}
 	if _, err := os.Stat(PartPath(out)); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("part file still present after completion: %v", err)
+	}
+}
+
+// uaServer serves blob the way a firewalled host does: any request under
+// Go's stock User-Agent is refused with 406 before reaching the content.
+// Every User-Agent seen is recorded. ranges selects whether the server
+// honors Range (chunked path) or ignores it (single-stream path); /start
+// redirects to the content, so a followed hop is checked too.
+func uaServer(t *testing.T, blob []byte, ranges bool) (*httptest.Server, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var seen []string
+	guard := func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			ua := r.Header.Get("User-Agent")
+			mu.Lock()
+			seen = append(seen, ua)
+			mu.Unlock()
+			if strings.HasPrefix(ua, "Go-http-client/") {
+				http.Error(w, "Not Acceptable!", http.StatusNotAcceptable)
+				return
+			}
+			next(w, r)
+		}
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/start", guard(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/blob", http.StatusFound)
+	}))
+	mux.HandleFunc("/blob", guard(func(w http.ResponseWriter, r *http.Request) {
+		if !ranges {
+			w.Header().Set("Content-Length", strconv.Itoa(len(blob)))
+			w.Write(blob)
+			return
+		}
+		http.ServeContent(w, r, "blob", time.Now(), bytes.NewReader(blob))
+	}))
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), seen...)
+	}
+}
+
+func TestUserAgentOnEveryRequest(t *testing.T) {
+	// Regression: requests went out as "Go-http-client/1.1", which
+	// ModSecurity-style firewalls refuse with 406 at the probe. Every
+	// request — probe, redirect hop, chunk, single stream — must carry the
+	// downloader's own User-Agent, with the default client and with a
+	// caller-supplied one alike.
+	blob := testBlob(1 << 20)
+	for _, tc := range []struct {
+		name      string
+		ranges    bool
+		ownClient bool
+		userAgent string
+		want      string
+	}{
+		{name: "chunked", ranges: true, want: DefaultUserAgent},
+		{name: "single stream", ranges: false, want: DefaultUserAgent},
+		{name: "caller client", ranges: true, ownClient: true, want: DefaultUserAgent},
+		{name: "override", ranges: true, userAgent: "custom/2.0", want: "custom/2.0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, seen := uaServer(t, blob, tc.ranges)
+			opts := Options{
+				URL:       srv.URL + "/start",
+				Output:    filepath.Join(t.TempDir(), "out.bin"),
+				ChunkSize: 256 << 10,
+				UserAgent: tc.userAgent,
+			}
+			if tc.ownClient {
+				opts.Client = srv.Client()
+			}
+			d, err := New(opts)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if err := d.Run(t.Context()); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if got, want := hashFile(t, opts.Output), sha256.Sum256(blob); got != want {
+				t.Errorf("output hash mismatch: got %x, want %x", got, want)
+			}
+			uas := seen()
+			// Probe and its redirect hop, plus at least one data request.
+			if len(uas) < 3 {
+				t.Fatalf("server saw %d requests, want at least 3", len(uas))
+			}
+			for i, ua := range uas {
+				if ua != tc.want {
+					t.Errorf("request %d: User-Agent = %q, want %q", i, ua, tc.want)
+				}
+			}
+		})
 	}
 }
